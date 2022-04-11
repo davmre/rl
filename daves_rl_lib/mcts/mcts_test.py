@@ -2,12 +2,11 @@ import functools
 import gym
 import pyspiel
 
-import environment
-import mcts
-import tree_policy
+from daves_rl_lib import environment
+from daves_rl_lib.mcts import mcts
+from daves_rl_lib.mcts import tree_policy
 
-import unittest
-
+from absl.testing import absltest
 from absl.testing import parameterized
 
 class MCTSTests(parameterized.TestCase):
@@ -44,4 +43,4 @@ class MCTSTests(parameterized.TestCase):
 
         
 if __name__ == '__main__':
-    unittest.main()
+    absltest.main()

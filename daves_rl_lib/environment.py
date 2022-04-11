@@ -63,7 +63,7 @@ class Environment(object):
     
     def sample_action(self, rng=np.random):
         return rng.choice(self.legal_actions())
-    
+
     
 class SpielGameEnvironment(Environment):
     """
