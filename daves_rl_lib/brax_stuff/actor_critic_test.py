@@ -22,11 +22,7 @@ def setup_test_environment(seed, env_size=2, env_dim=1, batch_size=32, discount_
     env = trivial_environment.TargetEnv(size=env_size, dim=env_dim)
     policy_optimizer = optax.adam(1e-3)
     value_optimizer = optax.adam(1e-3)
-    (
-        (state, state_value, state_seeds),
-        (policy_net, policy_weights, policy_optimizer_state),
-        (value_net, value_weights, value_optimizer_state)
-    ) = train.initialize_learner(
+    policy_net, value_net, learner = train.initialize_learner(
         env,
         policy_layer_sizes=[32, env._dim * 2],
         value_layer_sizes=[256, 32, 1],
@@ -45,11 +41,7 @@ def setup_test_environment(seed, env_size=2, env_dim=1, batch_size=32, discount_
         value_optimizer=value_optimizer,
         discount_factor=discount_factor)
 
-    return (
-        (env, state, state_value, state_seeds),
-        (policy_weights, policy_optimizer_state),
-        (value_weights, value_optimizer_state),
-        step_fn)
+    return env, learner, step_fn, policy_net, value_net
 
 
 
@@ -63,93 +55,39 @@ class ActorCriticTests(parameterized.TestCase):
     
     def test_step_preserves_shapes(self):
         batch_size = 32
-        (
-            (_, state, state_value, state_seeds),
-            (policy_weights, policy_optimizer_state),
-            (value_weights, value_optimizer_state),
-            step_fn
-        ) = setup_test_environment(seed=jax.random.PRNGKey(0),
-                                   batch_size=batch_size)
-        policy_trace, value_trace = jax.tree_util.tree_map(
-            lambda x: jnp.zeros((batch_size,) + x.shape),
-            (policy_weights, value_weights))
-            
-        (action,
-         next_state,
-         next_state_value,
-         new_value_weights,
-         new_value_trace,
-         new_value_optimizer_state,
-         new_policy_weights,
-         new_policy_trace,
-         new_policy_optimizer_state,
-         new_seeds) = (
-            step_fn(
-                states=state,
-                state_values=state_value,
-                step=0,
-                policy_weights=policy_weights,
-                policy_trace=policy_trace,
-                policy_optimizer_state=policy_optimizer_state,
-                value_weights=value_weights,
-                value_trace=value_trace,
-                value_optimizer_state=value_optimizer_state,
-                seeds=state_seeds))
-        
-        self.assertSameShapeNested(state, next_state)
-        self.assertSameShapeNested(state_value, next_state_value)
-
-        self.assertSameShapeNested(policy_weights, new_policy_weights)
-        self.assertSameShapeNested(value_weights, new_value_weights)
-
-        self.assertSameShapeNested(policy_trace, new_policy_trace)
-        self.assertSameShapeNested(value_trace, new_value_trace)
-
-        self.assertSameShapeNested(policy_optimizer_state, new_policy_optimizer_state)
-        self.assertSameShapeNested(value_optimizer_state, new_value_optimizer_state)
-        
-        self.assertSameShape(state_seeds, new_seeds)
+        env, learner, step_fn, _, _ = setup_test_environment(
+            seed=jax.random.PRNGKey(0),
+            batch_size=batch_size)
+        action, new_learner, diagnostics = step_fn(learner=learner, step=0)
+        self.assertSameShapeNested(learner, new_learner)
 
     def test_learns_in_trivial_environment(self):
         batch_size = 64
         discount_factor = 0.97
-        (
-            (env, initial_state, initial_state_value, seeds),
-            (policy_weights, policy_optimizer_state),
-            (value_weights, value_optimizer_state),
-            step_fn,
-        ) = setup_test_environment(seed=jax.random.PRNGKey(0),
-                                   batch_size=batch_size,
-                                   discount_factor=discount_factor)
-
-        jitted_step = jax.jit(step_fn)
-        average_returns = []
-        average_steps = []
-        for epoch in range(300):
-            (rollout,
-             seeds,
-             policy_weights,
-             policy_optimizer_state,
-             value_weights,
-             value_optimizer_state) = train.rollout_trajectory(
+        env, learner, step_fn, _, value_net = setup_test_environment(
+            seed=jax.random.PRNGKey(0),
+            batch_size=batch_size,
+            discount_factor=discount_factor)
+        jitted_epoch = jax.jit(
+            functools.partial(
+                train.advance_epoch,
                 env=env,
-                initial_state=initial_state,
-                initial_state_value=initial_state_value,
-                step_fn=jitted_step,
-                max_num_steps=30,
-                seeds=seeds,
-                policy_weights=policy_weights,
-                policy_optimizer_state=policy_optimizer_state,
-                value_weights=value_weights,
-                value_optimizer_state=value_optimizer_state)
-
-            total_steps = rollout[-1].step
-            total_return = train.discounted_return(rollout, discount_factor)
-            average_returns.append(jnp.mean(total_return))
-            average_steps.append(jnp.mean(total_steps))
-            print("epoch {} average per-step return {} average steps {}".format(
-                epoch, average_returns[-1], average_steps[-1]))
-        self.assertLessEqual(np.mean(average_steps[-10:]), 2.2)
+                value_net=value_net,
+                step_fn=step_fn,
+                max_num_steps=20,
+                discount_factor=discount_factor))
+        for epoch in range(150):
+            learner, diagnostics = jitted_epoch(learner=learner)
+            diagnostics = jax.tree_util.tree_map(float, diagnostics)
+            if (epoch + 1) % 10 == 0:
+                print("Epoch:", epoch, diagnostics)
+            
+        self.assertGreaterEqual(
+            diagnostics['initial_value'].mean, 0.95)
+        self.assertGreaterEqual(
+            diagnostics['return'].mean, 0.96)
+        self.assertLessEqual(
+            diagnostics['trajectory_length'].mean, 2.1)
 
 if __name__ == '__main__':
     absltest.main()
