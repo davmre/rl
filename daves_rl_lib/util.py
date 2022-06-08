@@ -5,6 +5,8 @@ import numpy as np
 import jax
 from jax import numpy as jnp
 
+import tree
+
 
 def tree_where(c, a_tree, b_tree):
     return jax.tree_util.tree_map(lambda a, b: jnp.where(c, a, b), a_tree,
@@ -30,5 +32,32 @@ def summarize(x):
 def format(x, fmt=lambda x: np.array_str(np.asarray(x), precision=3)):
     return jax.tree_util.tree_map(fmt, x)
 
+
 def format_summary(x, **kwargs):
-  return format(jax.tree_util.tree_map(summarize, x), **kwargs)
+    return format(jax.tree_util.tree_map(summarize, x), **kwargs)
+
+
+def map_with_debug_paths(fn, *xs):
+    # TODO: rewrite using private utils under `jax._src.tree_util`
+    # to work with general Pytree registrations.
+
+    def _map_with_paths_helper(path, *xs):
+        x1 = xs[0]
+        if jax.tree_util.tree_leaves(x1) == [x1]:  # At a leaf.
+            return fn(path, *xs)
+        if tree.is_nested(x1):
+            return tree.map_structure_with_path(
+                lambda p, *ys: _map_with_paths_helper(path + p, *ys), *xs)
+        if hasattr(x1, '__dataclass_fields__'):
+            field_names = x1.__dataclass_fields__.keys()
+            mapped = {}
+            for field_name in field_names:
+                mapped[field_name] = _map_with_paths_helper(
+                    path + (field_name,),
+                    *tuple(getattr(x, field_name) for x in xs))
+            return type(x1)(**mapped)
+        else:
+            raise TypeError(
+                f"I don't know how to define paths for pytree type {type(x1)}")
+
+    return _map_with_paths_helper((), *xs)

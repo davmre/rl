@@ -1,3 +1,4 @@
+import dataclasses
 from typing import Any
 import jax
 from jax import numpy as jnp
@@ -6,84 +7,125 @@ import numpy as np
 
 from flax import struct
 
-
-@struct.dataclass
-class TargetState:
-    done: jnp.ndarray
-    reward: jnp.ndarray
-    obs: jnp.ndarray
+from daves_rl_lib.brax_stuff import environment_lib
 
 
-class OneStepEnvironment(object):
+class OneStepEnvironment(environment_lib.JAXEnvironment):
 
-    def __init__(self):
-        self.action_size = 1
+    def __init__(self, discount_factor=1.):
+        super().__init__(action_space=environment_lib.ActionSpace(
+            shape=(), num_actions=1),
+                         discount_factor=discount_factor)
 
-    def reset(self, seed=None):
-        return TargetState(done=jnp.zeros([], dtype=np.bool),
-                           reward=jnp.zeros([]),
-                           obs=jnp.zeros([1]))
+    def _reset(self, seed):
+        return environment_lib.State(done=jnp.zeros([], dtype=np.bool),
+                                     reward=jnp.zeros([]),
+                                     observation=jnp.zeros([1]),
+                                     seed=seed)
 
     def step(self, state, action):
         del action  # Unused.
-        return TargetState(obs=jnp.ones_like(state.obs),
-                           done=jnp.ones([], dtype=np.bool),
-                           reward=jnp.where(state.done, 0., 1.))
+        return dataclasses.replace(state,
+                                   observation=jnp.ones_like(state.observation),
+                                   done=jnp.ones([], dtype=np.bool),
+                                   reward=jnp.where(state.done, 0., 1.))
 
 
-class DiscreteTargetEnvironment(object):
+class DiscreteTargetEnvironment(environment_lib.JAXEnvironment):
 
-    def __init__(self, size=1, dim=1):
+    def __init__(self,
+                 size=1,
+                 dim=1,
+                 one_hot_features=False,
+                 discount_factor=1.):
         self._size = size
         self._dim = dim
-        self.action_size = dim * 2
+        self._one_hot_features = one_hot_features
+        super().__init__(
+            action_space=environment_lib.ActionSpace(num_actions=dim * 2),
+            discount_factor=discount_factor)
 
-    def reset(self, seed=None):
-        return TargetState(done=False,
-                           reward=jnp.zeros([]),
-                           obs=jnp.zeros([self._dim], dtype=jnp.int32))
+    @property
+    def width(self):
+        return self._size * 2 + 1
 
-    def step(self, state, action):
+    def _to_state_idx(self, obs):
+        return jnp.sum(
+            (obs + self._size) * self.width**jnp.arange(self._dim - 1, -1, -1))
+
+    def _from_state_idx(self, idx):
+        coords = []
+        for _ in range(self._dim):
+            coords = [idx % self.width - self._size] + coords
+            idx //= self.width
+        return jnp.asarray(coords)
+
+    def _to_features(self, pos):
+        if self._one_hot_features:
+            return jax.nn.one_hot(self._to_state_idx(pos),
+                                  num_classes=self.width**self._dim)
+        return pos
+
+    def _from_features(self, features):
+        if self._one_hot_features:
+            return self._from_state_idx(jnp.argmax(features, axis=-1))
+        return features
+
+    def _reset(self, seed):
+        return environment_lib.State(done=False,
+                                     reward=jnp.zeros([]),
+                                     observation=self._to_features(
+                                         jnp.zeros([self._dim],
+                                                   dtype=jnp.int32)),
+                                     seed=seed)
+
+    def _step(self, state: environment_lib.State, action: jnp.ndarray):
         # action is an int between 0 and dim*2.
+        state_pos = self._from_features(state.observation)
         action_dim = action % self._dim
         action_dir = (action // self._dim) * 2 - 1
         delta = action_dir * jax.nn.one_hot(
-            action_dim, num_classes=self._dim, dtype=state.obs.dtype)
-        new_state_pos = state.obs + delta
+            action_dim, num_classes=self._dim, dtype=state_pos.dtype)
+        new_state_pos = state_pos + delta
         new_state_pos = jnp.minimum(
             jnp.maximum(new_state_pos,
                         -self._size * jnp.ones_like(new_state_pos)),
             self._size * jnp.ones_like(new_state_pos))
         new_state_done = jnp.all(new_state_pos == self._size *
                                  jax.nn.one_hot(0, num_classes=self._dim))
-        return TargetState(obs=jnp.where(state.done, state.obs, new_state_pos),
-                           done=jnp.where(state.done, state.done,
-                                          new_state_done),
-                           reward=jnp.where(state.done, 0.,
-                                            jnp.where(new_state_done, 1., 0.)))
+        return dataclasses.replace(state,
+                                   observation=self._to_features(new_state_pos),
+                                   done=new_state_done,
+                                   reward=jnp.where(new_state_done, 1., 0.))
 
 
-class ContinuousEnvironmentStateless(object):
+class ContinuousEnvironmentStateless(environment_lib.JAXEnvironment):
 
-    def __init__(self, dim=1, size=100.):
+    def __init__(self, dim=1, size=100., discount_factor=1.):
         self._dim = dim
         self._size = size
+        super().__init__(action_space=environment_lib.ActionSpace(
+            shape=(dim,), num_actions=None),
+                         discount_factor=discount_factor)
 
-    def reset(self, seed):
-        return TargetState(done=False,
-                           reward=jnp.zeros([]),
-                           obs=self._size *
-                           jax.random.normal(seed, shape=[self._dim]))
+    def _reset(self, seed):
+        seed, next_seed = jax.random.split(seed)
+        return environment_lib.State(done=False,
+                                     reward=jnp.zeros([]),
+                                     observation=self._size *
+                                     jax.random.normal(seed, shape=[self._dim]),
+                                     seed=next_seed)
 
-    def step(self, state, action):
+    def _step(self, state, action):
         # action is a vector of shape [dim]
-        loss = jnp.linalg.norm(action - state.obs[:-1])**2
-        return TargetState(obs=state.obs,
-                           done=jnp.ones([], dtype=np.bool),
-                           reward=-loss)
+        loss = jnp.linalg.norm(action - state.observation)**2
+        return dataclasses.replace(state,
+                                   observation=state.observation,
+                                   done=jnp.ones([], dtype=np.bool),
+                                   reward=-loss)
 
 
-class ContinuousEnvironmentInvertMatrix(object):
+class ContinuousEnvironmentInvertMatrix(environment_lib.JAXEnvironment):
 
     def __init__(self,
                  size=2,
@@ -93,21 +135,27 @@ class ContinuousEnvironmentInvertMatrix(object):
                  shape_reward=True):
         self._size = size
         self._dim = dim
+
         self._goal_tolerance = goal_tolerance
         self._shape_reward = shape_reward
         self._cost_of_living = cost_of_living
         self._matrix = jax.random.normal(jax.random.PRNGKey(0),
                                          shape=[self._dim, self._dim])
+        super().__init__(action_space=environment_lib.ActionSpace(
+            shape=(dim,), num_actions=None))
 
-    def reset(self, seed):
-        return TargetState(done=False,
-                           reward=jnp.zeros([]),
-                           obs=self._size *
-                           jax.random.normal(seed, shape=[self._dim]))
+    def _reset(self, seed):
+        seed, next_seed = jax.random.split(seed)
+        return environment_lib.State(
+            done=False,
+            reward=jnp.zeros([]),
+            seed=next_seed,
+            observation=(self._size *
+                         jax.random.normal(seed, shape=[self._dim])))
 
-    def step(self, state, action):
+    def _step(self, state, action):
         # action is a vector of shape [dim]
-        new_state_pos = state.obs + jnp.dot(self._matrix, action)
+        new_state_pos = state.observation + jnp.dot(self._matrix, action)
         new_state_pos = jnp.minimum(
             jnp.maximum(new_state_pos,
                         -self._size * 10 * jnp.ones_like(new_state_pos)),
@@ -118,8 +166,8 @@ class ContinuousEnvironmentInvertMatrix(object):
                            1. - distance_to_goal / self._goal_tolerance,
                            -self._cost_of_living)
         if self._shape_reward:
-            reward += jnp.linalg.norm(state.obs) - distance_to_goal
-        return TargetState(obs=jnp.where(state.done, state.obs, new_state_pos),
-                           done=jnp.where(state.done, state.done,
-                                          new_state_done),
-                           reward=jnp.where(state.done, 0., reward))
+            reward += jnp.linalg.norm(state.observation) - distance_to_goal
+        return dataclasses.replace(state,
+                                   observation=new_state_pos,
+                                   reward=reward,
+                                   done=new_state_done)
