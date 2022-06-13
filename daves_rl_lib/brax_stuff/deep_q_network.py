@@ -131,33 +131,53 @@ def update_qvalue_network(learner: DeepQLearner,
                         seed=next_seed)
 
 
-def collect_and_buffer_transitions(learner: DeepQLearner,
-                                   env: environment_lib.JAXEnvironment,
-                                   qvalue_net: networks.FeedForwardModel,
-                                   epsilon: float) -> DeepQLearner:
-    agent_states = jax.vmap(env.reset_if_done)(learner.agent_states)
-    actions, next_agent_states = jax.vmap(lambda episode: env.step_policy(
-        episode,
+def select_action(learner: DeepQLearner, epsilon: float):
+    seed, next_seed = jax.random.split(learner.seed, 2)
+    action = exploration_lib.select_action(
+        learner.agent_states.observation,
         policy_fn=exploration_lib.epsilon_greedy_policy(
-            qvalue_net=qvalue_net,
+            qvalue_net=learner.qvalue_net,
             qvalue_weights=learner.qvalue_weights,
-            epsilon=epsilon)))(agent_states)
-    transitions = replay_buffer.Transition(
-        state=agent_states,
-        action=actions,
-        next_state=next_agent_states,
-        td_error=qvalues_and_td_error(
-            state=agent_states,
-            action=actions,
-            next_state=next_agent_states,
-            qvalue_net=qvalue_net,
-            qvalue_weights=learner.qvalue_weights,
-            qvalue_target_weights=learner.qvalue_target_weights,
-            discount_factor=env.discount_factor)[-1])
+            epsilon=epsilon),
+        seed=seed)
+    learner = dataclasses.replace(learner, seed=next_seed)
+    return action, learner
+
+
+def collect_and_buffer_jax_transitions(learner: DeepQLearner,
+                                       env: environment_lib.JAXEnvironment,
+                                       qvalue_net: networks.FeedForwardModel,
+                                       epsilon: float) -> DeepQLearner:
+    seed, next_seed = jax.random.split(learner.seed, 2)
+    step_seeds = jax.random.split(seed, learner.agent_states.seed.shape[-2])
+
+    def step(state, step_seed):
+        state = env.reset_if_done(state)
+        action = exploration_lib.select_action(
+            state.observation,
+            policy_fn=exploration_lib.epsilon_greedy_policy(
+                qvalue_net=qvalue_net,
+                qvalue_weights=learner.qvalue_weights,
+                epsilon=epsilon),
+            seed=step_seed)
+        next_state = env.step(state, action)
+        return replay_buffer.Transition(
+            state, action, next_state,
+            qvalues_and_td_error(
+                state=state,
+                action=action,
+                next_state=next_state,
+                qvalue_net=qvalue_net,
+                qvalue_weights=learner.qvalue_weights,
+                qvalue_target_weights=learner.qvalue_target_weights,
+                discount_factor=env.discount_factor)[-1])
+
+    transitions = jax.vmap(step)(learner.agent_states, step_seeds)
     return dataclasses.replace(
         learner,
-        agent_states=next_agent_states,
-        replay_buffer=learner.replay_buffer.with_transitions(transitions))
+        agent_states=transitions.next_state,
+        replay_buffer=learner.replay_buffer.with_transitions(transitions),
+        seed=next_seed)
 
 
 def deep_q_update_step(learner: DeepQLearner,
@@ -167,10 +187,10 @@ def deep_q_update_step(learner: DeepQLearner,
                        epsilon: float) -> DeepQLearner:
     # take a step in the (batch of) environments and collect transition(s)
     # in the replay buffer
-    learner = collect_and_buffer_transitions(env=env,
-                                             learner=learner,
-                                             qvalue_net=qvalue_net,
-                                             epsilon=epsilon)
+    learner = collect_and_buffer_jax_transitions(env=env,
+                                                 learner=learner,
+                                                 qvalue_net=qvalue_net,
+                                                 epsilon=epsilon)
 
     # sample a (batch of) transition(s) from the buffer and update the network
     return update_qvalue_network(learner=learner,
@@ -179,3 +199,49 @@ def deep_q_update_step(learner: DeepQLearner,
                                  gradient_batch_size=gradient_batch_size,
                                  discount_factor=env.discount_factor,
                                  target_weights_decay=target_weights_decay)
+
+
+def compile_deep_q_update_step_python(env: environment_lib.PythonEnvironment,
+                                      qvalue_net: networks.FeedForwardModel,
+                                      qvalue_optimizer,
+                                      gradient_batch_size: int,
+                                      target_weights_decay: float,
+                                      epsilon: float,
+                                      jit_compile=True) -> DeepQLearner:
+    jit = jax.jit if jit_compile else lambda f: f
+
+    select_action = jax.jit(
+        lambda obs, weights, seed: exploration_lib.select_action(
+            obs,
+            seed=seed,
+            policy_fn=exploration_lib.epsilon_greedy_policy(
+                qvalue_net=qvalue_net, qvalue_weights=weights, epsilon=epsilon))
+    )
+    buffer_transition = jax.jit(lambda rb, t: rb.with_transition(t))
+    update_network = jax.jit(lambda l: update_qvalue_network(
+        learner=l,
+        qvalue_net=qvalue_net,
+        qvalue_optimizer=qvalue_optimizer,
+        gradient_batch_size=gradient_batch_size,
+        discount_factor=env.discount_factor,
+        target_weights_decay=target_weights_decay))
+
+    def update_learner(learner: DeepQLearner) -> DeepQLearner:
+        seed, next_seed = jax.random.split(learner.seed)
+        state = learner.agent_states
+        if state.done:
+            state = env.reset()
+        action = select_action(state.observation,
+                               weights=learner.qvalue_weights,
+                               seed=seed)
+        next_state = env.step(action)
+        updated_replay_buffer = buffer_transition(
+            learner.replay_buffer,
+            replay_buffer.Transition(state, action, next_state, td_error=0.))
+        learner = dataclasses.replace(learner,
+                                      agent_states=next_state,
+                                      replay_buffer=updated_replay_buffer,
+                                      seed=next_seed)
+        return update_network(learner)
+
+    return update_learner

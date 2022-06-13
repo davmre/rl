@@ -64,6 +64,7 @@ class ReplayBufferTests(test_util.TestCase):
         buffer = with_transitions(buffer, transitions)
         self.assertEqual(buffer.index, buffer_size - 5)
         self.assertFalse(buffer.is_full)
+        self.assertAllEqualNested(transitions, buffer.valid_transitions())
 
         buffer = with_transitions(buffer, transitions)
         self.assertEqual(buffer.index, buffer_size - 10)

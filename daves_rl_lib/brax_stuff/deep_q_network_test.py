@@ -1,6 +1,8 @@
 import dataclasses
 from statistics import mean
 
+import gym
+
 import numpy as np
 import jax
 from jax import numpy as jnp
@@ -10,6 +12,7 @@ from daves_rl_lib.brax_stuff import deep_q_network
 from daves_rl_lib.brax_stuff import replay_buffer
 from daves_rl_lib.brax_stuff import trivial_environment
 from daves_rl_lib.brax_stuff import environment_lib
+from daves_rl_lib.brax_stuff import exploration_lib
 from daves_rl_lib import networks
 from daves_rl_lib import test_util
 
@@ -41,13 +44,13 @@ class DQNTests(test_util.TestCase):
         buffer_size = 8
         qvalue_net, _, learner = self._setup_one_step_learner(
             env, buffer_size=buffer_size, batch_size=batch_size)
-        learner = deep_q_network.collect_and_buffer_transitions(
+        learner = deep_q_network.collect_and_buffer_jax_transitions(
             env=env, learner=learner, qvalue_net=qvalue_net, epsilon=0.)
         self.assertEqual(learner.replay_buffer.index, batch_size)
         self.assertFalse(learner.replay_buffer.is_full)
 
         # Check that environment gets reset.
-        learner = deep_q_network.collect_and_buffer_transitions(
+        learner = deep_q_network.collect_and_buffer_jax_transitions(
             env=env, learner=learner, qvalue_net=qvalue_net, epsilon=0.)
         self.assertEqual(learner.replay_buffer.index,
                          (batch_size * 2) % buffer_size)
@@ -171,3 +174,32 @@ class DQNTests(test_util.TestCase):
         self.assertAllClose(diagnostics['initial_qs'][-1, :],
                             [env.discount_factor**3, env.discount_factor],
                             atol=0.03)
+
+    def test_gym_cartpole(self):
+        buffer_size = 64
+        epsilon = 0.1
+        discount_factor = 0.6
+        env = environment_lib.GymEnvironment(gym.make("CartPole-v1"),
+                                             discount_factor=discount_factor)
+        qvalue_net, qvalue_optimizer, learner = self._setup_one_step_learner(
+            env, buffer_size=buffer_size, batch_size=None, learning_rate=0.1)
+        step_learner = deep_q_network.compile_deep_q_update_step_python(
+            env=env,
+            qvalue_net=qvalue_net,
+            qvalue_optimizer=qvalue_optimizer,
+            gradient_batch_size=8,
+            target_weights_decay=0.9,
+            epsilon=epsilon)
+        initial_obs = learner.agent_states.observation
+        for step in range(256):
+            learner = step_learner(learner)
+        # Value estimate for initial state should be close to optimal.
+        self.assertAllClose(np.max(
+            qvalue_net.apply(learner.qvalue_weights, initial_obs)),
+                            1 / (1 - discount_factor),
+                            rtol=0.15)
+        # Average per-step reward should be close to 1.
+        self.assertAllClose(np.mean(
+            learner.replay_buffer.valid_transitions().next_state.reward),
+                            1.0,
+                            atol=0.05)

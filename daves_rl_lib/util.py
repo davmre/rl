@@ -17,6 +17,24 @@ def batch_multiply(a, b):
     return jax.vmap(lambda x, y: x * y)(a, b)
 
 
+def as_numpy_seed(seed):
+    if seed is None:
+        return seed
+    return int(
+        jax.random.randint(seed,
+                           shape=(),
+                           minval=0,
+                           maxval=np.iinfo(np.int32).max))
+
+
+def as_jax_seed(seed):
+    if seed is None:
+        seed = np.random.randint(low=0, high=np.iinfo(np.int32).max)
+    if hasattr(seed, 'shape') and seed.shape == (2,):
+        return seed
+    return jax.random.PRNGKey(seed)
+
+
 SummaryStats = collections.namedtuple('SummaryStats',
                                       ['mean', 'std', 'median', 'min', 'max'])
 

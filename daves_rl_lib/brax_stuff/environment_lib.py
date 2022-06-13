@@ -87,11 +87,19 @@ class GymEnvironment(PythonEnvironment):
     def __init__(self, gym_env, discount_factor=1.):
         self._gym_env = gym_env
         self._action_sequence = []
+        self._initial_observation = None
         super().__init__(action_space=ActionSpace.from_gym_space(
             gym_env.action_space),
                          discount_factor=discount_factor)
 
+    @property
+    def observation_size(self):
+        if self._initial_observation is None:
+            self.reset()
+        return self._initial_observation.shape[-1]
+
     def step(self, action):
+        action = np.asarray(action)
         self._action_sequence.append(action)
         observation, reward, done, info = self._gym_env.step(action=action)
         self._episode_return += self.discount_factor**self._step * reward
@@ -101,15 +109,22 @@ class GymEnvironment(PythonEnvironment):
                      done=done,
                      info=info,
                      episode_return=self._episode_return,
-                     step=self._step)
+                     step=self._step,
+                     seed=0)
 
     def reset(self, seed=None):
         self._action_sequence = []
-        self._init_seed = seed
         self._episode_return = 0.
         self._step = 0
-        observation = self._gym_env.reset(seed=seed)
-        return observation
+        observation = self._gym_env.reset(seed=util.as_numpy_seed(seed))
+        self._initial_observation = observation
+        return State(observation=observation,
+                     reward=0,
+                     done=False,
+                     info={},
+                     episode_return=0,
+                     step=0,
+                     seed=0)
 
 
 class JAXEnvironment(Environment):
@@ -141,22 +156,6 @@ class JAXEnvironment(Environment):
             state.done,
             dataclasses.replace(state, reward=jnp.zeros_like(state.reward)),
             new_state)
-
-    def step_policy(self, state: State, policy_fn: Callable):
-        """Executes a sampled action and updates the episode.
-
-        If the episode is done, this is a no-op.
-        """
-        seed, next_seed = jax.random.split(state.seed)
-        action_dist = policy_fn(state.observation)
-        if len(action_dist.batch_shape):
-            raise ValueError(
-                'A single input produced a batch policy: {}. You may need to '
-                'wrap the output distribution with `tfd.Independent`'.format(
-                    action_dist))
-        action = action_dist.sample(seed=seed)
-        return action, self.step(dataclasses.replace(state, seed=next_seed),
-                                 action)
 
     def _reset(self, seed=None) -> State:
         raise NotImplementedError('reset() not implemented.')

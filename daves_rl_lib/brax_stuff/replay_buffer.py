@@ -1,5 +1,5 @@
 from typing import Any
-
+import numpy as np
 import jax
 import jax.numpy as jnp
 
@@ -43,7 +43,8 @@ class ReplayBuffer:
 
     def with_transition(self, transition: Transition):
         return self.with_transitions(
-            jax.tree_util.tree_map(lambda x: x[None, ...], transition))
+            jax.tree_util.tree_map(lambda x: jnp.asarray(x)[None, ...],
+                                   transition))
 
     def with_transitions(self, transitions: Transition):
         """Returns a new buffer, replacing the oldest transitions."""
@@ -67,6 +68,11 @@ class ReplayBuffer:
         return ReplayBuffer(transitions=updated_transitions,
                             index=updated_index,
                             is_full=updated_is_full)
+
+    def valid_transitions(self) -> Transition:
+        """Returns the valid transitions in the buffer."""
+        valid_idx = jnp.where(self.is_full, self.size, self.index)
+        return jax.tree_util.tree_map(lambda x: x[:valid_idx], self.transitions)
 
     def sample_uniform(self, seed, batch_shape=()) -> Transition:
         """Samples `batch_size` transitions uniformly from the replay buffer."""

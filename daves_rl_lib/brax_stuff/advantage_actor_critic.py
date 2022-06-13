@@ -9,6 +9,7 @@ import optax
 from daves_rl_lib import networks
 from daves_rl_lib import train
 from daves_rl_lib import util
+from daves_rl_lib.brax_stuff import exploration_lib
 from daves_rl_lib.brax_stuff import environment_lib
 
 
@@ -106,9 +107,13 @@ def make_advantage_actor_critic_single_minibatch(
         initial_agent_state = env.reset_if_done(agent_state)
 
         def loop_body(agent_state, _):
-            action, next_state = env.step_policy(
-                agent_state,
-                policy_fn=lambda obs: policy_net.apply(policy_weights, obs))
+            seed, next_seed = jax.random.split(agent_state.seed)
+            action = exploration_lib.select_action(
+                agent_state.observation,
+                policy_fn=lambda obs: policy_net.apply(policy_weights, obs),
+                seed=seed)
+            next_state = env.step(
+                dataclasses.replace(agent_state, seed=next_seed), action)
             return next_state, (action, next_state)
 
         final_state, (actions, non_initial_agent_states) = jax.lax.scan(

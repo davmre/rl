@@ -1,7 +1,19 @@
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 
 from tensorflow_probability.substrates import jax as tfp
+
+
+def select_action(observation, policy_fn, seed):
+    action_dist = policy_fn(observation)
+    if len(action_dist.batch_shape):
+        raise ValueError(
+            'A single input produced a batch policy: {}. You may need to '
+            'wrap the output distribution with `tfd.Independent`'.format(
+                action_dist))
+    return action_dist.sample(seed=seed)
 
 
 def epsilon_greedy_policy(qvalue_net, qvalue_weights, epsilon=1e-2):
