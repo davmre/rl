@@ -1,11 +1,11 @@
-from typing import Any, Callable, Sequence, Tuple, Optional
 import dataclasses
+from typing import Any, Callable, Optional, Sequence, Tuple
 
 import jax
 import jax.numpy as jnp
-from flax import struct
-from flax import linen
 
+from flax import linen
+from flax import struct
 from tensorflow_probability.substrates import jax as tfp
 
 

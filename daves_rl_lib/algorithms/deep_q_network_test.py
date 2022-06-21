@@ -1,23 +1,23 @@
 import dataclasses
-from typing import Optional
 from statistics import mean
+from typing import Optional
 
 import gym
 
-import numpy as np
 import jax
 from jax import numpy as jnp
+import numpy as np
+
 import optax
-
-from daves_rl_lib.algorithms import deep_q_network
-from daves_rl_lib.algorithms import replay_buffer
-from daves_rl_lib.environments import trivial_environment
-from daves_rl_lib.environments import environment_lib
-from daves_rl_lib.algorithms import exploration_lib
-from daves_rl_lib import networks
-from daves_rl_lib.internal import test_util
-
 from tensorflow_probability.substrates import jax as tfp
+
+from daves_rl_lib import networks
+from daves_rl_lib.algorithms import deep_q_network
+from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.algorithms import replay_buffer
+from daves_rl_lib.environments import environment_lib
+from daves_rl_lib.environments import trivial_environment
+from daves_rl_lib.internal import test_util
 
 
 class DQNTests(test_util.TestCase):

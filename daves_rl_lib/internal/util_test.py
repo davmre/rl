@@ -2,16 +2,15 @@ from typing import Any
 
 from absl.testing import parameterized
 
-import numpy as np
 import jax
 from jax import numpy as jnp
+import numpy as np
 
 from flax import struct
-
 from tensorflow_probability.substrates import jax as tfp
 
-from daves_rl_lib import test_util
-from daves_rl_lib import util
+from daves_rl_lib.internal import test_util
+from daves_rl_lib.internal import util
 
 
 @struct.dataclass

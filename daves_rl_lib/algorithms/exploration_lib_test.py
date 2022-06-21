@@ -1,15 +1,14 @@
 from absl.testing import parameterized
 
-import numpy as np
 import jax
 from jax import numpy as jnp
+import numpy as np
 
 from tensorflow_probability.substrates import jax as tfp
 
-from daves_rl_lib.internal import test_util
 from daves_rl_lib import networks
-
 from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.internal import test_util
 
 
 class ExplorationTests(test_util.TestCase):

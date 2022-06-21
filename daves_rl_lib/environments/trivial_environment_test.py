@@ -6,8 +6,8 @@ from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
 
-from daves_rl_lib.internal import test_util
 from daves_rl_lib.environments import trivial_environment
+from daves_rl_lib.internal import test_util
 
 
 class TrivialEnvironmentTests(test_util.TestCase):

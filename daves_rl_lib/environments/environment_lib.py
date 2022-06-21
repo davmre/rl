@@ -1,15 +1,15 @@
 import dataclasses
 from typing import Any, Callable, Dict, Optional, Union
+
 import jax
 from jax import numpy as jnp
-
-from brax import envs as brax_envs
-
 import numpy as np
 
+from brax import envs as brax_envs
 from flax import struct
 
-from daves_rl_lib.internal import type_util, util
+from daves_rl_lib.internal import type_util
+from daves_rl_lib.internal import util
 
 
 @dataclasses.dataclass

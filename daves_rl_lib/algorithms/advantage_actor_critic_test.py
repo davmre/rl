@@ -1,16 +1,20 @@
 import dataclasses
 
+from absl.testing import absltest
+from absl.testing import parameterized
+
 import jax
-import numpy as np
-import optax
-from absl.testing import absltest, parameterized
 from jax import numpy as jnp
+import numpy as np
+
+import optax
 from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import advantage_actor_critic
 from daves_rl_lib.environments import trivial_environment
-from daves_rl_lib.internal import test_util, util
+from daves_rl_lib.internal import test_util
+from daves_rl_lib.internal import util
 
 
 def trace_episode_length_and_reward(

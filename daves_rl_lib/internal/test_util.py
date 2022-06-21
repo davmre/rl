@@ -1,12 +1,12 @@
 from absl.testing import parameterized
-
-import numpy as np
-import jax
-
 import tree
 
-from daves_rl_lib.internal import util
+import jax
+import numpy as np
+
 from daves_rl_lib.internal import type_util
+from daves_rl_lib.internal import util
+
 
 def test_seed(n=1) -> type_util.KeyArray:
     seed = jax.random.PRNGKey(42)

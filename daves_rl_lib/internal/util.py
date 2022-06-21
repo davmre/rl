@@ -1,11 +1,13 @@
 import collections
+from typing import Optional, Union
 
-import numpy as np
+import tree
 
 import jax
 from jax import numpy as jnp
+import numpy as np
 
-import tree
+from daves_rl_lib.internal import type_util
 
 
 def tree_where(c, a_tree, b_tree):
@@ -27,12 +29,12 @@ def as_numpy_seed(seed):
                            maxval=np.iinfo(np.int32).max))
 
 
-def as_jax_seed(seed):
+def as_jax_seed(seed: Optional[Union[int, np.ndarray]]) -> type_util.KeyArray:
     if seed is None:
         seed = np.random.randint(low=0, high=np.iinfo(np.int32).max)
-    if hasattr(seed, 'shape') and seed.shape == (2,):
-        return seed
-    return jax.random.PRNGKey(seed)
+    if hasattr(seed, 'shape') and seed.shape == (2,):  # type: ignore
+        return jnp.asarray(seed)
+    return jax.random.PRNGKey(seed)  # type: ignore
 
 
 SummaryStats = collections.namedtuple('SummaryStats',

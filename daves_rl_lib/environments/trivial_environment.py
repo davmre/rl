@@ -1,8 +1,8 @@
 import dataclasses
 from typing import Any
+
 import jax
 from jax import numpy as jnp
-
 import numpy as np
 
 from flax import struct
