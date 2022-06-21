@@ -1,6 +1,3 @@
-import dataclasses
-
-import jax
 import jax.numpy as jnp
 
 from tensorflow_probability.substrates import jax as tfp

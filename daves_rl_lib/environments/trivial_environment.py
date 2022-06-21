@@ -7,10 +7,10 @@ import numpy as np
 
 from flax import struct
 
-from daves_rl_lib.brax_stuff import environment_lib
+from daves_rl_lib.environments import environment_lib
 
 
-class OneStepEnvironment(environment_lib.JAXEnvironment):
+class OneStepEnvironment(environment_lib.Environment):
 
     def __init__(self, discount_factor=1.):
         super().__init__(action_space=environment_lib.ActionSpace(
@@ -18,7 +18,7 @@ class OneStepEnvironment(environment_lib.JAXEnvironment):
                          discount_factor=discount_factor)
 
     def _reset(self, seed):
-        return environment_lib.State(done=jnp.zeros([], dtype=np.bool),
+        return environment_lib.State(done=jnp.zeros([], dtype=bool),
                                      reward=jnp.zeros([]),
                                      observation=jnp.zeros([1]),
                                      seed=seed)
@@ -27,11 +27,11 @@ class OneStepEnvironment(environment_lib.JAXEnvironment):
         del action  # Unused.
         return dataclasses.replace(state,
                                    observation=jnp.ones_like(state.observation),
-                                   done=jnp.ones([], dtype=np.bool),
+                                   done=jnp.ones([], dtype=bool),
                                    reward=jnp.where(state.done, 0., 1.))
 
 
-class DiscreteTargetEnvironment(environment_lib.JAXEnvironment):
+class DiscreteTargetEnvironment(environment_lib.Environment):
 
     def __init__(self,
                  size=1,
@@ -72,7 +72,7 @@ class DiscreteTargetEnvironment(environment_lib.JAXEnvironment):
         return features
 
     def _reset(self, seed):
-        return environment_lib.State(done=False,
+        return environment_lib.State(done=jnp.array(False),
                                      reward=jnp.zeros([]),
                                      observation=self._to_features(
                                          jnp.zeros([self._dim],
@@ -99,7 +99,7 @@ class DiscreteTargetEnvironment(environment_lib.JAXEnvironment):
                                    reward=jnp.where(new_state_done, 1., 0.))
 
 
-class ContinuousEnvironmentStateless(environment_lib.JAXEnvironment):
+class ContinuousEnvironmentStateless(environment_lib.Environment):
 
     def __init__(self, dim=1, size=100., discount_factor=1.):
         self._dim = dim
@@ -110,7 +110,7 @@ class ContinuousEnvironmentStateless(environment_lib.JAXEnvironment):
 
     def _reset(self, seed):
         seed, next_seed = jax.random.split(seed)
-        return environment_lib.State(done=False,
+        return environment_lib.State(done=jnp.array(False),
                                      reward=jnp.zeros([]),
                                      observation=self._size *
                                      jax.random.normal(seed, shape=[self._dim]),
@@ -121,11 +121,11 @@ class ContinuousEnvironmentStateless(environment_lib.JAXEnvironment):
         loss = jnp.linalg.norm(action - state.observation)**2
         return dataclasses.replace(state,
                                    observation=state.observation,
-                                   done=jnp.ones([], dtype=np.bool),
+                                   done=jnp.ones([], dtype=bool),
                                    reward=-loss)
 
 
-class ContinuousEnvironmentInvertMatrix(environment_lib.JAXEnvironment):
+class ContinuousEnvironmentInvertMatrix(environment_lib.Environment):
 
     def __init__(self,
                  size=2,
@@ -147,7 +147,7 @@ class ContinuousEnvironmentInvertMatrix(environment_lib.JAXEnvironment):
     def _reset(self, seed):
         seed, next_seed = jax.random.split(seed)
         return environment_lib.State(
-            done=False,
+            done=jnp.array(False),
             reward=jnp.zeros([]),
             seed=next_seed,
             observation=(self._size *

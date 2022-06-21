@@ -5,10 +5,10 @@ import jax
 
 import tree
 
-from daves_rl_lib import util
+from daves_rl_lib.internal import util
+from daves_rl_lib.internal import type_util
 
-
-def test_seed(n=1):
+def test_seed(n=1) -> type_util.KeyArray:
     seed = jax.random.PRNGKey(42)
     if n > 1:
         return jax.random.split(seed, n)

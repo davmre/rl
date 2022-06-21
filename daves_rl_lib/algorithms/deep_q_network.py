@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 import jax
 import jax.numpy as jnp
 
@@ -7,11 +7,11 @@ from flax import struct
 import optax
 
 from daves_rl_lib import networks
-from daves_rl_lib import train
-from daves_rl_lib import util
-from daves_rl_lib.brax_stuff import environment_lib
-from daves_rl_lib.brax_stuff import exploration_lib
-from daves_rl_lib.brax_stuff import replay_buffer
+from daves_rl_lib.internal import util
+from daves_rl_lib.internal import type_util
+from daves_rl_lib.environments import environment_lib
+from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.algorithms import replay_buffer
 
 
 @struct.dataclass
@@ -21,21 +21,19 @@ class DeepQLearner:
     qvalue_weights: Any
     qvalue_target_weights: Any
     qvalue_optimizer_state: Any
-    seed: jnp.ndarray  # for the replay buffer
+    seed: type_util.KeyArray
 
 
 def initialize_learner(env: environment_lib.Environment,
                        qvalue_net: networks.FeedForwardModel,
                        qvalue_optimizer,
                        buffer_size: int,
-                       seed: jax.random.PRNGKey,
-                       batch_size: int = None):
+                       seed: type_util.KeyArray,
+                       batch_size: Optional[int] = None):
     episodes_seed, weights_seed, buffer_seed = jax.random.split(seed, 3)
     initial_weights = qvalue_net.init(weights_seed)
     return DeepQLearner(
-        agent_states=environment_lib.initialize_batch(env,
-                                                      batch_size=batch_size,
-                                                      seed=episodes_seed),
+        agent_states=env.reset(batch_size=batch_size, seed=episodes_seed),
         replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
             size=buffer_size,
             dummy_state=env.reset(seed=buffer_seed),
@@ -131,21 +129,8 @@ def update_qvalue_network(learner: DeepQLearner,
                         seed=next_seed)
 
 
-def select_action(learner: DeepQLearner, epsilon: float):
-    seed, next_seed = jax.random.split(learner.seed, 2)
-    action = exploration_lib.select_action(
-        learner.agent_states.observation,
-        policy_fn=exploration_lib.epsilon_greedy_policy(
-            qvalue_net=learner.qvalue_net,
-            qvalue_weights=learner.qvalue_weights,
-            epsilon=epsilon),
-        seed=seed)
-    learner = dataclasses.replace(learner, seed=next_seed)
-    return action, learner
-
-
 def collect_and_buffer_jax_transitions(learner: DeepQLearner,
-                                       env: environment_lib.JAXEnvironment,
+                                       env: environment_lib.Environment,
                                        qvalue_net: networks.FeedForwardModel,
                                        epsilon: float) -> DeepQLearner:
     seed, next_seed = jax.random.split(learner.seed, 2)
@@ -180,8 +165,7 @@ def collect_and_buffer_jax_transitions(learner: DeepQLearner,
         seed=next_seed)
 
 
-def deep_q_update_step(learner: DeepQLearner,
-                       env: environment_lib.JAXEnvironment,
+def deep_q_update_step(learner: DeepQLearner, env: environment_lib.Environment,
                        qvalue_net: networks.FeedForwardModel, qvalue_optimizer,
                        gradient_batch_size: int, target_weights_decay: float,
                        epsilon: float) -> DeepQLearner:
@@ -201,13 +185,14 @@ def deep_q_update_step(learner: DeepQLearner,
                                  target_weights_decay=target_weights_decay)
 
 
-def compile_deep_q_update_step_python(env: environment_lib.PythonEnvironment,
-                                      qvalue_net: networks.FeedForwardModel,
-                                      qvalue_optimizer,
-                                      gradient_batch_size: int,
-                                      target_weights_decay: float,
-                                      epsilon: float,
-                                      jit_compile=True) -> DeepQLearner:
+def compile_deep_q_update_step_stateful(
+        env: environment_lib.ExternalEnvironment,
+        qvalue_net: networks.FeedForwardModel,
+        qvalue_optimizer,
+        gradient_batch_size: int,
+        target_weights_decay: float,
+        epsilon: float,
+        jit_compile=True) -> Callable[[DeepQLearner], DeepQLearner]:
     jit = jax.jit if jit_compile else lambda f: f
 
     select_action = jax.jit(

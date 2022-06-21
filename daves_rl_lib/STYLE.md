@@ -1,1 +1,0 @@
-1. All code is auto-formatted using `yapf --style=google`.

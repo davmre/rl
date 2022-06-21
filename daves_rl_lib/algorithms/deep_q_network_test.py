@@ -1,4 +1,5 @@
 import dataclasses
+from typing import Optional
 from statistics import mean
 
 import gym
@@ -8,13 +9,13 @@ import jax
 from jax import numpy as jnp
 import optax
 
-from daves_rl_lib.brax_stuff import deep_q_network
-from daves_rl_lib.brax_stuff import replay_buffer
-from daves_rl_lib.brax_stuff import trivial_environment
-from daves_rl_lib.brax_stuff import environment_lib
-from daves_rl_lib.brax_stuff import exploration_lib
+from daves_rl_lib.algorithms import deep_q_network
+from daves_rl_lib.algorithms import replay_buffer
+from daves_rl_lib.environments import trivial_environment
+from daves_rl_lib.environments import environment_lib
+from daves_rl_lib.algorithms import exploration_lib
 from daves_rl_lib import networks
-from daves_rl_lib import test_util
+from daves_rl_lib.internal import test_util
 
 from tensorflow_probability.substrates import jax as tfp
 
@@ -24,7 +25,7 @@ class DQNTests(test_util.TestCase):
     def _setup_one_step_learner(self,
                                 env,
                                 buffer_size,
-                                batch_size=1,
+                                batch_size: Optional[int] = 1,
                                 learning_rate=1.0):
         qvalue_net = networks.make_model([env.action_space.num_actions],
                                          obs_size=env.observation_size)
@@ -70,7 +71,7 @@ class DQNTests(test_util.TestCase):
             observation=jnp.zeros([buffer_size, 1]),
             done=jnp.zeros([buffer_size], dtype=bool),
             reward=jnp.zeros([buffer_size]),
-            step=jnp.zeros([buffer_size], dtype=jnp.int32),
+            num_steps=jnp.zeros([buffer_size], dtype=jnp.int32),
             episode_return=jnp.zeros([buffer_size]),
             seed=test_util.test_seed())
         reward = jnp.array([1.] * (buffer_size // 2) + [0.5] *
@@ -81,8 +82,8 @@ class DQNTests(test_util.TestCase):
             next_state=dataclasses.replace(dummy_states,
                                            reward=reward,
                                            episode_return=reward,
-                                           step=jnp.ones_like(
-                                               dummy_states.step)),
+                                           num_steps=jnp.ones_like(
+                                               dummy_states.num_steps)),
             td_error=jnp.zeros([buffer_size]))
         learner = dataclasses.replace(
             learner,
@@ -183,7 +184,7 @@ class DQNTests(test_util.TestCase):
                                              discount_factor=discount_factor)
         qvalue_net, qvalue_optimizer, learner = self._setup_one_step_learner(
             env, buffer_size=buffer_size, batch_size=None, learning_rate=0.1)
-        step_learner = deep_q_network.compile_deep_q_update_step_python(
+        step_learner = deep_q_network.compile_deep_q_update_step_stateful(
             env=env,
             qvalue_net=qvalue_net,
             qvalue_optimizer=qvalue_optimizer,

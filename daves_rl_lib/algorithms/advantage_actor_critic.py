@@ -7,14 +7,14 @@ from flax import struct
 import optax
 
 from daves_rl_lib import networks
-from daves_rl_lib import train
-from daves_rl_lib import util
-from daves_rl_lib.brax_stuff import exploration_lib
-from daves_rl_lib.brax_stuff import environment_lib
+from daves_rl_lib.internal import type_util
+from daves_rl_lib.internal import util
+from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.environments import environment_lib
 
 
 @struct.dataclass
-class TraceableQuantities:
+class A2CTraceableQuantities:
     actions: jnp.ndarray
     agent_states: environment_lib.State
     state_values: jnp.ndarray
@@ -28,6 +28,9 @@ class TraceableQuantities:
     entropy_grad: Any
     regularized_policy_grad: Any
     num_nonterminal_steps: jnp.ndarray
+
+
+A2CTraceFn = Callable[[A2CTraceableQuantities], type_util.PyTree]
 
 
 @struct.dataclass
@@ -52,9 +55,7 @@ def initialize_learner(
     policy_weights = policy_net.init(policy_seed)
     value_weights = value_net.init(value_seed)
     return A2CLearner(
-        agent_states=environment_lib.initialize_batch(env,
-                                                      batch_size=batch_size,
-                                                      seed=state_seed),
+        agent_states=env.reset(batch_size=batch_size, seed=state_seed),
         value_weights=value_weights,
         value_optimizer_state=value_optimizer.init(value_weights),
         policy_weights=policy_weights,
@@ -91,7 +92,7 @@ def batch_policy_gradient(policy_net, policy_weights, batch_obs, batch_actions,
 
 
 def make_advantage_actor_critic_single_minibatch(
-        env: environment_lib.JAXEnvironment,
+        env: environment_lib.Environment,
         num_steps: int,
         policy_net: networks.FeedForwardModel,
         policy_weights,
@@ -158,11 +159,12 @@ def make_advantage_actor_critic_single_minibatch(
             entropy_grad)
 
         diagnostics = trace_fn(
-            TraceableQuantities(actions, agent_states, state_values,
-                                value_weights, value_grad, returns, advantage,
-                                policy_weights, policy_grad, policy_entropy,
-                                entropy_grad, regularized_policy_grad,
-                                num_nonterminal_steps))
+            A2CTraceableQuantities(actions, agent_states, state_values,
+                                   value_weights, value_grad, returns,
+                                   advantage, policy_weights, policy_grad,
+                                   policy_entropy, entropy_grad,
+                                   regularized_policy_grad,
+                                   num_nonterminal_steps))
 
         return final_state, value_grad, regularized_policy_grad, diagnostics
 
@@ -170,14 +172,14 @@ def make_advantage_actor_critic_single_minibatch(
 
 
 def make_advantage_actor_critic_batch_step(
-        env: environment_lib.JAXEnvironment,
+        env: environment_lib.Environment,
         num_steps: int,
         policy_net: networks.FeedForwardModel,
         policy_optimizer,
         value_net: networks.FeedForwardModel,
         value_optimizer,
         entropy_regularization: float = 0.,
-        trace_fn=lambda *a, **kw: (),
+        trace_fn: A2CTraceFn = lambda *a, **kw: (),
 ) -> Callable:
 
     def scan_body(learner, _=None):

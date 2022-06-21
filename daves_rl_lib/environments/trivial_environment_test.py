@@ -6,8 +6,8 @@ from absl.testing import parameterized
 import jax
 from jax import numpy as jnp
 
-from daves_rl_lib import test_util
-from daves_rl_lib.brax_stuff import trivial_environment
+from daves_rl_lib.internal import test_util
+from daves_rl_lib.environments import trivial_environment
 
 
 class TrivialEnvironmentTests(test_util.TestCase):
@@ -20,26 +20,26 @@ class TrivialEnvironmentTests(test_util.TestCase):
         self.assertSequenceEqual(state.observation, [0])
         # Move left until we bounce off the edge.
         for expected_idx in (-1, -2, -3, -3, -3):
-            state = env.step(state, 0)
+            state = env.step(state, jnp.array(0))
             self.assertSequenceEqual(state.observation, [expected_idx])
             self.assertFalse(state.done)
             self.assertEqual(state.reward, 0.)
 
         # Now move right
         for expected_idx in (-2, -1, 0, 1, 2):
-            state = env.step(state, 1)
+            state = env.step(state, jnp.array(1))
             self.assertSequenceEqual(state.observation, [expected_idx])
             self.assertFalse(state.done)
             self.assertEqual(state.reward, 0.)
 
         # Transition to terminal state
-        state = env.step(state, 1)
+        state = env.step(state, jnp.array(1))
         self.assertSequenceEqual(state.observation, [3])
         self.assertTrue(state.done)
         self.assertEqual(state.reward, 1.)
 
         # Actions in terminal state are no-ops with no reward.
-        state = env.step(state, 0)
+        state = env.step(state, jnp.array(0))
         self.assertSequenceEqual(state.observation, [3])
         self.assertTrue(state.done)
         self.assertEqual(state.reward, 0.)
@@ -60,20 +60,20 @@ class TrivialEnvironmentTests(test_util.TestCase):
                                        (0, (-1, -2)), (2, (0, -2)),
                                        (2, (1, -2)), (2, (2, -2)), (3, (2,
                                                                         -1))):
-            state = env.step(state, action)
+            state = env.step(state, jnp.asarray(action))
             self.assertSequenceEqual(as_position(state.observation),
                                      expected_obs)
             self.assertFalse(state.done)
             self.assertEqual(state.reward, 0.)
 
         # Transition to terminal state
-        state = env.step(state, 3)
+        state = env.step(state, jnp.asarray(3))
         self.assertSequenceEqual(as_position(state.observation), (2, 0))
         self.assertTrue(state.done)
         self.assertEqual(state.reward, 1.)
 
         # Actions in terminal state are no-ops with no reward.
-        state = env.step(state, 0)
+        state = env.step(state, jnp.asarray(0))
         self.assertSequenceEqual(as_position(state.observation), (2, 0))
         self.assertTrue(state.done)
         self.assertEqual(state.reward, 0.)

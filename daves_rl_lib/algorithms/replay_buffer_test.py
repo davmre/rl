@@ -6,8 +6,8 @@ from jax import numpy as jnp
 
 from tensorflow_probability.substrates import jax as tfp
 
-from daves_rl_lib import test_util
-from daves_rl_lib.brax_stuff import replay_buffer
+from daves_rl_lib.internal import test_util
+from daves_rl_lib.algorithms import replay_buffer
 
 
 def dummy_transitions(num_transitions, seed, action_is_vector=True):

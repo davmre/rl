@@ -6,17 +6,17 @@ from jax import numpy as jnp
 
 from tensorflow_probability.substrates import jax as tfp
 
-from daves_rl_lib import test_util
+from daves_rl_lib.internal import test_util
 from daves_rl_lib import networks
 
-from daves_rl_lib.brax_stuff import exploration_lib
+from daves_rl_lib.algorithms import exploration_lib
 
 
 class ExplorationTests(test_util.TestCase):
 
-    @parameterized.named_parameters([('_no_batch', np.float32([1., 2.]), 4),
+    @parameterized.named_parameters([('_no_batch', np.asarray([1., 2.]), 4),
                                      ('_batch',
-                                      np.float32([[1., 2.], [3., 4.],
+                                      np.asarray([[1., 2.], [3., 4.],
                                                   [5., 6.]]), 4),
                                      ('_one_action', np.array([1., 2.]), 1)])
     def test_epsilon_greedy(self, obs, num_actions):

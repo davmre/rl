@@ -1,17 +1,19 @@
-from typing import Any
+from typing import Any, Union
 import numpy as np
 import jax
 import jax.numpy as jnp
 
 from flax import struct
 
+from daves_rl_lib.internal import type_util
+
 
 @struct.dataclass
 class Transition:
-    state: Any
+    state: type_util.PyTree
     action: jnp.ndarray
-    next_state: Any
-    td_error: jnp.ndarray
+    next_state: type_util.PyTree
+    td_error: Union[float, jnp.ndarray]
 
 
 @struct.dataclass
