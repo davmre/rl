@@ -46,13 +46,19 @@ class DQNTests(test_util.TestCase):
         qvalue_net, _, learner = self._setup_one_step_learner(
             env, buffer_size=buffer_size, batch_size=batch_size)
         learner = deep_q_network.collect_and_buffer_jax_transitions(
-            env=env, learner=learner, qvalue_net=qvalue_net, epsilon=0.)
+            env=env,
+            learner=learner,
+            qvalue_net=qvalue_net,
+            epsilon_fn=optax.constant_schedule(0.))
         self.assertEqual(learner.replay_buffer.index, batch_size)
         self.assertFalse(learner.replay_buffer.is_full)
 
         # Check that environment gets reset.
         learner = deep_q_network.collect_and_buffer_jax_transitions(
-            env=env, learner=learner, qvalue_net=qvalue_net, epsilon=0.)
+            env=env,
+            learner=learner,
+            qvalue_net=qvalue_net,
+            epsilon_fn=optax.constant_schedule(0.))
         self.assertEqual(learner.replay_buffer.index,
                          (batch_size * 2) % buffer_size)
         self.assertTrue(learner.replay_buffer.is_full)

@@ -1,3 +1,5 @@
+from typing import Union
+
 import jax.numpy as jnp
 
 from tensorflow_probability.substrates import jax as tfp
@@ -13,7 +15,9 @@ def select_action(observation, policy_fn, seed):
     return action_dist.sample(seed=seed)
 
 
-def epsilon_greedy_policy(qvalue_net, qvalue_weights, epsilon=1e-2):
+def epsilon_greedy_policy(qvalue_net,
+                          qvalue_weights,
+                          epsilon: Union[float, jnp.ndarray] = 1e-2):
 
     def policy_fn(obs):
         qvalues = qvalue_net.apply(qvalue_weights, obs)

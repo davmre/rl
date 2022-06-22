@@ -27,6 +27,10 @@ class ActionSpace:
     num_actions: Optional[int] = None
 
     @property
+    def dtype(self):
+        return jnp.int32 if self.is_discrete else jnp.float32
+
+    @property
     def is_discrete(self):
         return self.num_actions is not None
 
