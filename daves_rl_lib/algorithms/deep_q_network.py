@@ -67,7 +67,8 @@ def qvalues_and_td_error(state: environment_lib.State,
 
     Returns:
       qvalues: (batch of) scalar action values estimated for the transitions.
-      target_values: (batch  of) scalar values estmated for the post-transition states.
+      target_values: (batch  of) scalar values estimated for the post-transition
+        states.
       td_error: (batch of) scalar temporal difference error(s).
     """
     next_state_values = jnp.where(
