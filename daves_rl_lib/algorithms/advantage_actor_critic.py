@@ -21,6 +21,7 @@ class A2CTraceableQuantities:
     state_values: jnp.ndarray
     value_weights: Any
     value_grad: Any
+    reward_to_go: jnp.ndarray
     returns: jnp.ndarray
     advantage: jnp.ndarray
     policy_weights: Any
@@ -121,7 +122,8 @@ def make_advantage_actor_critic_single_minibatch(
         final_state, (actions, non_initial_agent_states) = jax.lax.scan(
             loop_body, init=initial_agent_state, xs=jnp.arange(num_steps))
 
-        # length `n + 1` including both initial and final (pre-reset) states
+        # length `num_steps + 1` including both initial and final (pre-reset)
+        # states
         agent_states = jax.tree_util.tree_map(
             lambda a, b: jnp.concatenate([a[None, ...], b], axis=0),
             initial_agent_state, non_initial_agent_states)
@@ -132,17 +134,26 @@ def make_advantage_actor_critic_single_minibatch(
 
         final_state_values = jnp.where(agent_states.done[-1], 0.,
                                        state_values[-1])
+        # Quantities with shape `[num_steps]`:
         td_horizon = jnp.arange(num_steps, 0, -1)
-        returns = (rewards_to_go(agent_states.reward[1:],
-                                 discount_factor=env.discount_factor) +
-                   env.discount_factor**td_horizon * final_state_values)
+        rtg = rewards_to_go(agent_states.reward[1:],
+                            discount_factor=env.discount_factor)
+        returns = (rtg + env.discount_factor**td_horizon * final_state_values)
         advantage = jnp.where(agent_states.done[:-1], 0.,
                               returns - state_values[:-1])
+
+        # Value and policy gradients are computed at a per-step scale, so that
+        # increasing `num_steps` does *not* increase the scale of the gradients;
+        # it just reduces their variance. It's not clear to me if this makes
+        # sense - typically when we increase `num_steps` per update we
+        # decrease the number of outer-loop updates, and debatably we want
+        # the 'total learning' to remain constant under that adjustment, which
+        # would suggest increasing the scale. However, the current approach is
+        # most consistent with the style convention that batch size parameters
+        # (which `num_steps` sort-of is) are independent of learning rates.
         value_grad = jax.tree_util.tree_map(
             (lambda x: jnp.sum(util.batch_multiply(-advantage, x[:-1]), axis=0)
-             / num_nonterminal_steps),
-            values_grad,
-        )
+             / num_nonterminal_steps), values_grad)
 
         policy_grad = batch_policy_gradient(
             policy_net,
@@ -161,7 +172,7 @@ def make_advantage_actor_critic_single_minibatch(
 
         diagnostics = trace_fn(
             A2CTraceableQuantities(actions, agent_states, state_values,
-                                   value_weights, value_grad, returns,
+                                   value_weights, value_grad, rtg, returns,
                                    advantage, policy_weights, policy_grad,
                                    policy_entropy, entropy_grad,
                                    regularized_policy_grad,
@@ -219,3 +230,35 @@ def make_advantage_actor_critic_batch_step(
         )
 
     return scan_body
+
+
+def concatenate_diagnostic_steps(x, num_steps=None):
+    """Reconstructs continuous diagnostics from `scan` output.
+
+    Running the batch steps produced by `make_advantage_actor_critic_batch_step`
+    in a `scan` loop returns traced diagnostics of shape
+    `[scan_iterations, batch_size, num_steps + 1, ...]`,
+    in which each scan iteration takes `num_steps` steps and (for quantities
+    based on `agent_states`) also traces
+    diagnostics for the initial state, so we get `num_steps + 1` diagnostics
+    for each batch element at each iteration.
+
+    This utility reshapes a diagnostic to have shape
+    `[batch_size, scan_steps * num_steps, ...]`, giving a full trace
+    for each batch element.
+
+    Example usage:
+
+    ```python
+    learner, diagnostics = jax.lax.scan(scan_body, learner, jnp.arange(1000))
+    diagnostics = jax.tree_util.tree_map(concatenate_diagnostic_steps,
+                                         diagnostics)
+    ```
+    """
+    scan_iterations, batch_size, num_steps_plus1 = x.shape[:3]
+    if num_steps is None:
+        num_steps = num_steps_plus1 - 1
+    trimmed_x_with_batch_size_first = jnp.transpose(
+        x[:, :, -num_steps:, ...], axes=(1, 0) + tuple(range(2, len(x.shape))))
+    return jnp.reshape(trimmed_x_with_batch_size_first,
+                       (batch_size, scan_iterations * num_steps) + x.shape[3:])

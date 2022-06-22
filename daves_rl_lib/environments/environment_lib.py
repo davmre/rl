@@ -86,7 +86,7 @@ class State:
                      num_steps=num_steps,
                      seed=seed,
                      reward=brax_state.reward,
-                     done=brax_state.reward,
+                     done=brax_state.done,
                      unobserved=brax_state.qp,
                      episode_return=episode_return,
                      info=brax_state.info,
