@@ -2,10 +2,10 @@ import collections
 import copy
 from dataclasses import dataclass
 from os import environ
-
 from typing import Any, Dict, Optional, Type
 
 from jax import numpy as np
+
 
 class MCTSNode(object):
 
@@ -15,11 +15,14 @@ class MCTSNode(object):
         self.node_statistics = None
         self.action_statistics = {}
 
+
 def initialize_tree(environment):
     return MCTSNode(parent=None, children={})
 
+
 def random_rollout_policy(environment):
     return environment.sample_action()
+
 
 def do_rollout(environment, rollout_policy):
     total_rewards = np.zeros([environment.num_players])
@@ -32,10 +35,11 @@ def do_rollout(environment, rollout_policy):
         discount *= environment.discount_factor
     return total_rewards
 
+
 def descend(tree, environment, tree_policy):
     action_stack = []
     rewards_stack = []
-    
+
     # Descend through the existing tree until we reach a leaf.
     still_descending = True
     while still_descending:
@@ -52,7 +56,9 @@ def descend(tree, environment, tree_policy):
         tree = tree.children[new_state]
     return tree, action_stack, rewards_stack, done
 
-def backpropagate(tree_leaf, values, action_stack, rewards_stack, tree_policy, discount_factor):
+
+def backpropagate(tree_leaf, values, action_stack, rewards_stack, tree_policy,
+                  discount_factor):
     tree = tree_leaf.parent
     while tree is not None:
         action, rewards = action_stack.pop(), rewards_stack.pop()
@@ -60,18 +66,22 @@ def backpropagate(tree_leaf, values, action_stack, rewards_stack, tree_policy, d
         tree_policy.update_statistics(tree, action, values)
         tree = tree.parent
 
+
 def update_tree(tree, environment, tree_policy, rollout_policy):
-    tree_leaf, action_stack, rewards_stack, done = descend(tree, environment, tree_policy=tree_policy)
+    tree_leaf, action_stack, rewards_stack, done = descend(
+        tree, environment, tree_policy=tree_policy)
     if done:
         remaining_values = np.zeros([environment.num_players])
     else:
-        remaining_values = do_rollout(environment, rollout_policy=rollout_policy)
+        remaining_values = do_rollout(environment,
+                                      rollout_policy=rollout_policy)
     backpropagate(tree_leaf,
                   values=remaining_values,
                   action_stack=action_stack,
                   rewards_stack=rewards_stack,
                   tree_policy=tree_policy,
                   discount_factor=environment.discount_factor)
+
 
 def select_action(tree,
                   env,
@@ -82,11 +92,13 @@ def select_action(tree,
     simulation_env = env.copy()
     for k in range(num_rollouts):
         simulation_env.set_state(current_state)
-        update_tree(tree, simulation_env, tree_policy=tree_policy, rollout_policy=rollout_policy)
-        
+        update_tree(tree,
+                    simulation_env,
+                    tree_policy=tree_policy,
+                    rollout_policy=rollout_policy)
+
     action, values = tree_policy.optimal_action(tree, env)
     observation, rewards, done, info = env.step(action)
     new_tree = tree.children[env.get_state_key()]
     new_tree.parent = None  # Garbage collect the old tree.
     return new_tree, action, values, rewards, done, observation
-

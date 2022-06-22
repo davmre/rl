@@ -1,9 +1,9 @@
 import copy
 from pydoc import resolve
 
-import numpy as np
-
 import tree
+
+import numpy as np
 
 
 def resolve_chance_node(state, rng=np.random):
