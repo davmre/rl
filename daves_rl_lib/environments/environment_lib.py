@@ -97,6 +97,10 @@ class State:
                                info=self.info,
                                metrics=self.metrics)  # type: ignore
 
+    def minimize(self):
+        """Remove debugging information from the state."""
+        return dataclasses.replace(self, metrics={}, info={})
+
     @property
     def batch_shape(self):
         return self.seed.shape[:-1]
@@ -218,7 +222,7 @@ class ExternalEnvironment(object):
     def observation_size(self):
         raise NotImplementedError('observation_size is not implemented')
 
-    def reset(self, seed=None):
+    def reset(self, seed=None, batch_size=None):
         raise NotImplementedError('reset() not implemented.')
 
     def step(self, action):

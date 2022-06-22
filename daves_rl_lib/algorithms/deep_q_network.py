@@ -1,5 +1,6 @@
 import dataclasses
-from typing import Any, Callable, Optional
+from os import environ
+from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -18,6 +19,7 @@ from daves_rl_lib.internal import util
 @struct.dataclass
 class DeepQLearner:
     agent_states: environment_lib.State
+    last_action: jnp.ndarray
     replay_buffer: replay_buffer.ReplayBuffer
     qvalue_weights: Any
     qvalue_target_weights: Any
@@ -25,7 +27,8 @@ class DeepQLearner:
     seed: type_util.KeyArray
 
 
-def initialize_learner(env: environment_lib.Environment,
+def initialize_learner(env: Union[environment_lib.Environment,
+                                  environment_lib.ExternalEnvironment],
                        qvalue_net: networks.FeedForwardModel,
                        qvalue_optimizer,
                        buffer_size: int,
@@ -35,23 +38,23 @@ def initialize_learner(env: environment_lib.Environment,
     initial_weights = qvalue_net.init(weights_seed)
     return DeepQLearner(
         agent_states=env.reset(batch_size=batch_size, seed=episodes_seed),
+        last_action=jnp.zeros(env.action_space.shape),
         replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
             size=buffer_size,
             dummy_state=env.reset(seed=buffer_seed),
             action_shape=env.action_space.shape),
         qvalue_weights=initial_weights,
-        qvalue_target_weights=jax.tree_util.tree_map(jnp.zeros_like,
-                                                     initial_weights),
+        qvalue_target_weights=initial_weights,
         qvalue_optimizer_state=qvalue_optimizer.init(initial_weights),
         seed=buffer_seed)
 
 
-def qvalues_and_td_error(state,
-                         action,
-                         next_state,
-                         qvalue_net,
-                         qvalue_weights,
-                         qvalue_target_weights,
+def qvalues_and_td_error(state: environment_lib.State,
+                         action: jnp.ndarray,
+                         next_state: environment_lib.State,
+                         qvalue_net: networks.FeedForwardModel,
+                         qvalue_weights: type_util.PyTree,
+                         qvalue_target_weights: type_util.PyTree,
                          discount_factor=1.):
     """
 
@@ -81,7 +84,7 @@ def qvalue_weights_grad_from_transitions(transitions: replay_buffer.Transition,
                                          discount_factor):
     """Computes the gradient of the loss function w.r.t. the weights."""
 
-    def squared_td_error(weights):
+    def mean_squared_td_error(weights):
         qvalues, target_values, td_errors = qvalues_and_td_error(
             state=transitions.state,
             action=transitions.action,
@@ -90,9 +93,9 @@ def qvalue_weights_grad_from_transitions(transitions: replay_buffer.Transition,
             qvalue_weights=weights,
             qvalue_target_weights=qvalue_target_weights,
             discount_factor=discount_factor)
-        return 0.5 * jnp.sum(td_errors**2, axis=-1), (qvalues, target_values)
+        return 0.5 * jnp.mean(td_errors**2, axis=-1), (qvalues, target_values)
 
-    grad, (qvalues, target_values) = jax.grad(squared_td_error,
+    grad, (qvalues, target_values) = jax.grad(mean_squared_td_error,
                                               has_aux=True)(qvalue_weights)
     return grad, qvalues, target_values
 
@@ -122,12 +125,11 @@ def update_qvalue_network(learner: DeepQLearner,
         lambda x, y: target_weights_decay * x + (1 - target_weights_decay) * y,
         learner.qvalue_target_weights, qvalue_weights)
 
-    return DeepQLearner(agent_states=learner.agent_states,
-                        replay_buffer=learner.replay_buffer,
-                        qvalue_weights=qvalue_weights,
-                        qvalue_optimizer_state=qvalue_optimizer_state,
-                        qvalue_target_weights=qvalue_target_weights,
-                        seed=next_seed)
+    return dataclasses.replace(learner,
+                               qvalue_weights=qvalue_weights,
+                               qvalue_optimizer_state=qvalue_optimizer_state,
+                               qvalue_target_weights=qvalue_target_weights,
+                               seed=next_seed)
 
 
 def collect_and_buffer_jax_transitions(learner: DeepQLearner,
@@ -148,7 +150,7 @@ def collect_and_buffer_jax_transitions(learner: DeepQLearner,
             seed=step_seed)
         next_state = env.step(state, action)
         return replay_buffer.Transition(
-            state, action, next_state,
+            state.minimize(), action, next_state.minimize(),
             qvalues_and_td_error(
                 state=state,
                 action=action,
@@ -161,6 +163,7 @@ def collect_and_buffer_jax_transitions(learner: DeepQLearner,
     transitions = jax.vmap(step)(learner.agent_states, step_seeds)
     return dataclasses.replace(
         learner,
+        last_action=transitions.action,
         agent_states=transitions.next_state,
         replay_buffer=learner.replay_buffer.with_transitions(transitions),
         seed=next_seed)
@@ -223,8 +226,12 @@ def compile_deep_q_update_step_stateful(
         next_state = env.step(action)
         updated_replay_buffer = buffer_transition(
             learner.replay_buffer,
-            replay_buffer.Transition(state, action, next_state, td_error=0.))
+            replay_buffer.Transition(state.minimize(),
+                                     action,
+                                     next_state.minimize(),
+                                     td_error=0.))
         learner = dataclasses.replace(learner,
+                                      last_action=action,
                                       agent_states=next_state,
                                       replay_buffer=updated_replay_buffer,
                                       seed=next_seed)
