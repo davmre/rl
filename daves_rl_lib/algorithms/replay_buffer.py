@@ -6,37 +6,31 @@ import numpy as np
 
 from flax import struct
 
+from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import type_util
-
-
-@struct.dataclass
-class Transition:
-    state: type_util.PyTree
-    action: jnp.ndarray
-    next_state: type_util.PyTree
-    td_error: Union[float, jnp.ndarray]
 
 
 @struct.dataclass
 class ReplayBuffer:
 
-    transitions: Transition
+    transitions: environment_lib.Transition
     index: jnp.ndarray
     is_full: jnp.ndarray
 
     @staticmethod
-    def initialize_empty(size, dummy_state: Any, action_shape: tuple):
+    def initialize_empty(size, observation: jnp.ndarray, action: jnp.ndarray):
 
         def batch_zeros_like(s):
             s = jnp.asarray(s)
             return jnp.zeros((size,) + s.shape, dtype=s.dtype)
 
-        dummy_states = jax.tree_util.tree_map(batch_zeros_like, dummy_state)
-        return ReplayBuffer(transitions=Transition(
-            state=dummy_states,
-            action=jnp.zeros((size,) + action_shape),
-            next_state=dummy_states,
-            td_error=jnp.zeros([size])),
+        dummy_observations = batch_zeros_like(observation)
+        return ReplayBuffer(transitions=environment_lib.Transition(
+            observation=dummy_observations,
+            action=batch_zeros_like(action),
+            next_observation=dummy_observations,
+            reward=jnp.zeros([size]),
+            done=jnp.zeros([size], dtype=bool)),
                             index=jnp.zeros([], dtype=jnp.int32),
                             is_full=jnp.zeros([], dtype=bool))
 
@@ -44,12 +38,17 @@ class ReplayBuffer:
     def size(self):
         return self.transitions.action.shape[0]
 
-    def with_transition(self, transition: Transition):
+    def reset(self):
+        return ReplayBuffer(transitions=self.transitions,
+                            index=jnp.zeros([], dtype=jnp.int32),
+                            is_full=jnp.zeros([], dtype=bool))
+
+    def with_transition(self, transition: environment_lib.Transition):
         return self.with_transitions(
             jax.tree_util.tree_map(lambda x: jnp.asarray(x)[None, ...],
                                    transition))
 
-    def with_transitions(self, transitions: Transition):
+    def with_transitions(self, transitions: environment_lib.Transition):
         """Returns a new buffer, replacing the oldest transitions."""
         num_transitions = transitions.action.shape[0]
         if num_transitions > self.size:
@@ -72,12 +71,14 @@ class ReplayBuffer:
                             index=updated_index,
                             is_full=updated_is_full)
 
-    def valid_transitions(self) -> Transition:
+    def valid_transitions(self) -> environment_lib.Transition:
         """Returns the valid transitions in the buffer."""
         valid_idx = jnp.where(self.is_full, self.size, self.index)
         return jax.tree_util.tree_map(lambda x: x[:valid_idx], self.transitions)
 
-    def sample_uniform(self, seed, batch_shape=()) -> Transition:
+    def sample_uniform(
+        self, seed: type_util.KeyArray, batch_shape: tuple = ()
+    ) -> environment_lib.Transition:
         """Samples `batch_size` transitions uniformly from the replay buffer."""
         indices = jax.random.randint(seed,
                                      shape=batch_shape,

@@ -12,6 +12,15 @@ from daves_rl_lib.internal import type_util
 from daves_rl_lib.internal import util
 
 
+@struct.dataclass
+class Transition:
+    observation: jnp.ndarray
+    action: jnp.ndarray
+    next_observation: jnp.ndarray
+    reward: jnp.ndarray
+    done: jnp.ndarray
+
+
 @dataclasses.dataclass
 class ActionSpace:
     """Specifies the action space of an environment.
@@ -42,6 +51,11 @@ class ActionSpace:
             return ActionSpace(num_actions=gym_space.n)
         raise NotImplementedError('Gym space type not supported:',
                                   type(gym_space))
+
+    def dummy_action(self, batch_size=None):
+        return jnp.zeros(self.shape if batch_size is None else
+                         (batch_size,) + self.shape,
+                         dtype=self.dtype)
 
 
 @struct.dataclass

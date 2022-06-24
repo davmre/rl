@@ -9,6 +9,7 @@ from flax import struct
 import optax
 
 from daves_rl_lib import networks
+from daves_rl_lib.algorithms import agent_lib
 from daves_rl_lib.algorithms import exploration_lib
 from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
@@ -17,9 +18,7 @@ from daves_rl_lib.internal import util
 
 
 @struct.dataclass
-class DeepQLearner:
-    agent_states: environment_lib.State
-    last_action: jnp.ndarray
+class DQNWeights:
     replay_buffer: replay_buffer.ReplayBuffer
     qvalue_weights: Any
     qvalue_target_weights: Any
@@ -28,34 +27,91 @@ class DeepQLearner:
     seed: type_util.KeyArray
 
 
-def initialize_learner(env: Union[environment_lib.Environment,
-                                  environment_lib.ExternalEnvironment],
-                       qvalue_net: networks.FeedForwardModel,
-                       qvalue_optimizer,
-                       buffer_size: int,
-                       seed: type_util.KeyArray,
-                       batch_size: Optional[int] = None):
-    episodes_seed, weights_seed, buffer_seed = jax.random.split(seed, 3)
-    initial_weights = qvalue_net.init(weights_seed)
-    return DeepQLearner(
-        agent_states=env.reset(batch_size=batch_size, seed=episodes_seed),
-        last_action=jnp.zeros(((batch_size,) if batch_size else
-                               ()) + env.action_space.shape,
-                              dtype=env.action_space.dtype),
-        replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
-            size=buffer_size,
-            dummy_state=env.reset(seed=buffer_seed),
-            action_shape=env.action_space.shape),
-        qvalue_weights=initial_weights,
-        qvalue_target_weights=initial_weights,
-        qvalue_optimizer_state=qvalue_optimizer.init(initial_weights),
-        num_steps=jnp.asarray(0),
-        seed=buffer_seed)
+class DQNAgent(agent_lib.Agent):
+
+    def __init__(self,
+                 qvalue_net: networks.FeedForwardModel,
+                 qvalue_optimizer: optax.GradientTransformation,
+                 replay_buffer_size: int,
+                 epsilon: Union[float, optax.Schedule],
+                 target_weights_decay: float,
+                 gradient_batch_size: int,
+                 discount_factor: float = 1.):
+        self._qvalue_net = qvalue_net
+        self._qvalue_optimizer = qvalue_optimizer
+        self._replay_buffer_size = replay_buffer_size
+        self._epsilon_fn = epsilon if callable(
+            epsilon) else optax.constant_schedule(epsilon)
+        self._target_weights_decay = target_weights_decay
+        self._gradient_batch_size = gradient_batch_size
+        self._discount_factor = discount_factor
+        super().__init__()
+
+    @property
+    def qvalue_net(self):
+        return self._qvalue_net
+
+    def _init_weights(self, seed: type_util.KeyArray,
+                      dummy_observation: jnp.ndarray,
+                      dummy_action: jnp.ndarray):
+        seed, weights_seed = jax.random.split(seed, 2)
+        qvalue_weights = self.qvalue_net.init(weights_seed)
+        return DQNWeights(
+            replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
+                size=self._replay_buffer_size,
+                observation=dummy_observation,
+                action=dummy_action),
+            qvalue_weights=qvalue_weights,
+            qvalue_target_weights=qvalue_weights,
+            qvalue_optimizer_state=self._qvalue_optimizer.init(qvalue_weights),
+            num_steps=jnp.zeros([], dtype=jnp.int32),
+            seed=seed)
+
+    def _action_dist(self, observation, weights: DQNWeights):
+        policy_fn = exploration_lib.epsilon_greedy_policy(
+            qvalue_net=self.qvalue_net,
+            qvalue_weights=weights.qvalue_weights,
+            epsilon=self._epsilon_fn(weights.num_steps))
+        return policy_fn(observation)
+
+    def _update(self, weights: DQNWeights,
+                transition: environment_lib.Transition) -> DQNWeights:
+        batch_shape = transition.done.shape
+        if batch_shape:
+            replay_buffer = weights.replay_buffer.with_transitions(transition)
+        else:
+            replay_buffer = weights.replay_buffer.with_transition(transition)
+
+        seed, replay_seed = jax.random.split(weights.seed)
+        # Compute TD error and update the network accordingly.
+        qvalue_weights_grad, _, _ = qvalue_weights_grad_from_transitions(
+            transitions=replay_buffer.sample_uniform(
+                batch_shape=(self._gradient_batch_size,), seed=replay_seed),
+            qvalue_net=self.qvalue_net,
+            qvalue_weights=weights.qvalue_weights,
+            qvalue_target_weights=weights.qvalue_target_weights,
+            discount_factor=self._discount_factor)
+
+        (qvalue_weights_update,
+         qvalue_optimizer_state) = self._qvalue_optimizer.update(
+             qvalue_weights_grad, weights.qvalue_optimizer_state)
+        qvalue_weights = optax.apply_updates(weights.qvalue_weights,
+                                             qvalue_weights_update)
+
+        return DQNWeights(
+            replay_buffer=replay_buffer,
+            qvalue_weights=qvalue_weights,
+            qvalue_optimizer_state=qvalue_optimizer_state,
+            # Update the target network as a moving average.
+            qvalue_target_weights=jax.tree_util.tree_map(
+                lambda x, y: self._target_weights_decay * x +
+                (1 - self._target_weights_decay) * y,
+                weights.qvalue_target_weights, qvalue_weights),
+            seed=seed,
+            num_steps=weights.num_steps + 1)
 
 
-def qvalues_and_td_error(state: environment_lib.State,
-                         action: jnp.ndarray,
-                         next_state: environment_lib.State,
+def qvalues_and_td_error(transition: environment_lib.Transition,
                          qvalue_net: networks.FeedForwardModel,
                          qvalue_weights: type_util.PyTree,
                          qvalue_target_weights: type_util.PyTree,
@@ -63,7 +119,6 @@ def qvalues_and_td_error(state: environment_lib.State,
     """
 
     Args:
-      state: structure of arrays with optional batch dimension.
 
     Returns:
       qvalues: (batch of) scalar action values estimated for the transitions.
@@ -72,28 +127,27 @@ def qvalues_and_td_error(state: environment_lib.State,
       td_error: (batch of) scalar temporal difference error(s).
     """
     next_state_values = jnp.where(
-        next_state.done, 0,
-        jnp.max(qvalue_net.apply(qvalue_target_weights, next_state.observation),
+        transition.done, 0,
+        jnp.max(qvalue_net.apply(qvalue_target_weights,
+                                 transition.next_observation),
                 axis=-1))
-    target_values = next_state.reward + discount_factor * next_state_values
+    target_values = transition.reward + discount_factor * next_state_values
     qvalues = jnp.take_along_axis(qvalue_net.apply(qvalue_weights,
-                                                   state.observation),
-                                  action[..., None],
+                                                   transition.observation),
+                                  transition.action[..., None],
                                   axis=-1)[..., 0]
     return qvalues, target_values, qvalues - target_values
 
 
-def qvalue_weights_grad_from_transitions(transitions: replay_buffer.Transition,
-                                         qvalue_net: networks.FeedForwardModel,
-                                         qvalue_weights, qvalue_target_weights,
-                                         discount_factor):
+def qvalue_weights_grad_from_transitions(
+        transitions: environment_lib.Transition,
+        qvalue_net: networks.FeedForwardModel, qvalue_weights,
+        qvalue_target_weights, discount_factor):
     """Computes the gradient of the loss function w.r.t. the weights."""
 
     def mean_squared_td_error(weights):
         qvalues, target_values, td_errors = qvalues_and_td_error(
-            state=transitions.state,
-            action=transitions.action,
-            next_state=transitions.next_state,
+            transition=transitions,
             qvalue_net=qvalue_net,
             qvalue_weights=weights,
             qvalue_target_weights=qvalue_target_weights,
@@ -103,151 +157,3 @@ def qvalue_weights_grad_from_transitions(transitions: replay_buffer.Transition,
     grad, (qvalues, target_values) = jax.grad(mean_squared_td_error,
                                               has_aux=True)(qvalue_weights)
     return grad, qvalues, target_values
-
-
-def update_qvalue_network(learner: DeepQLearner,
-                          qvalue_net: networks.FeedForwardModel,
-                          qvalue_optimizer, gradient_batch_size: int,
-                          target_weights_decay: float,
-                          discount_factor: float) -> DeepQLearner:
-    """Trains the Q network using a batch of transitions from the buffer."""
-    seed, next_seed = jax.random.split(learner.seed)
-    # Compute TD error and update the network accordingly.
-    qvalue_weights_grad, _, _ = qvalue_weights_grad_from_transitions(
-        transitions=learner.replay_buffer.sample_uniform(
-            batch_shape=(gradient_batch_size,), seed=seed),
-        qvalue_net=qvalue_net,
-        qvalue_weights=learner.qvalue_weights,
-        qvalue_target_weights=learner.qvalue_target_weights,
-        discount_factor=discount_factor)
-    qvalue_weights_update, qvalue_optimizer_state = qvalue_optimizer.update(
-        qvalue_weights_grad, learner.qvalue_optimizer_state)
-    qvalue_weights = optax.apply_updates(learner.qvalue_weights,
-                                         qvalue_weights_update)
-
-    # Update the target network as a moving average.
-    qvalue_target_weights = jax.tree_util.tree_map(
-        lambda x, y: target_weights_decay * x + (1 - target_weights_decay) * y,
-        learner.qvalue_target_weights, qvalue_weights)
-
-    return dataclasses.replace(learner,
-                               qvalue_weights=qvalue_weights,
-                               qvalue_optimizer_state=qvalue_optimizer_state,
-                               qvalue_target_weights=qvalue_target_weights,
-                               seed=next_seed)
-
-
-def collect_and_buffer_jax_transitions(
-        learner: DeepQLearner, env: environment_lib.Environment,
-        qvalue_net: networks.FeedForwardModel,
-        epsilon_fn: optax.Schedule) -> DeepQLearner:
-    seed, next_seed = jax.random.split(learner.seed, 2)
-    step_seeds = jax.random.split(seed, learner.agent_states.seed.shape[-2])
-
-    def step(state, step_seed):
-        state = env.reset_if_done(state)
-        action = exploration_lib.select_action(
-            state.observation,
-            policy_fn=exploration_lib.epsilon_greedy_policy(
-                qvalue_net=qvalue_net,
-                qvalue_weights=learner.qvalue_weights,
-                epsilon=epsilon_fn(learner.num_steps)),
-            seed=step_seed)
-        next_state = env.step(state, action)
-        return replay_buffer.Transition(
-            state.minimize(), action, next_state.minimize(),
-            qvalues_and_td_error(
-                state=state,
-                action=action,
-                next_state=next_state,
-                qvalue_net=qvalue_net,
-                qvalue_weights=learner.qvalue_weights,
-                qvalue_target_weights=learner.qvalue_target_weights,
-                discount_factor=env.discount_factor)[-1])
-
-    transitions = jax.vmap(step)(learner.agent_states, step_seeds)
-    return dataclasses.replace(
-        learner,
-        last_action=transitions.action,
-        agent_states=transitions.next_state,
-        replay_buffer=learner.replay_buffer.with_transitions(transitions),
-        num_steps=learner.num_steps + 1,
-        seed=next_seed)
-
-
-def deep_q_update_step(learner: DeepQLearner, env: environment_lib.Environment,
-                       qvalue_net: networks.FeedForwardModel, qvalue_optimizer,
-                       gradient_batch_size: int, target_weights_decay: float,
-                       epsilon: Union[float, optax.Schedule]) -> DeepQLearner:
-    # take a step in the (batch of) environments and collect transition(s)
-    # in the replay buffer
-    epsilon_fn = epsilon if callable(epsilon) else optax.constant_schedule(
-        epsilon)
-    learner = collect_and_buffer_jax_transitions(env=env,
-                                                 learner=learner,
-                                                 qvalue_net=qvalue_net,
-                                                 epsilon_fn=epsilon_fn)
-
-    # sample a (batch of) transition(s) from the buffer and update the network
-    return update_qvalue_network(learner=learner,
-                                 qvalue_net=qvalue_net,
-                                 qvalue_optimizer=qvalue_optimizer,
-                                 gradient_batch_size=gradient_batch_size,
-                                 discount_factor=env.discount_factor,
-                                 target_weights_decay=target_weights_decay)
-
-
-def compile_deep_q_update_step_stateful(
-        env: environment_lib.ExternalEnvironment,
-        qvalue_net: networks.FeedForwardModel,
-        qvalue_optimizer,
-        gradient_batch_size: int,
-        target_weights_decay: float,
-        epsilon: Union[float, optax.Schedule],
-        jit_compile=True) -> Callable[[DeepQLearner], DeepQLearner]:
-    jit = jax.jit if jit_compile else lambda f: f
-    epsilon_fn = epsilon if callable(epsilon) else optax.constant_schedule(
-        epsilon)
-
-    select_action = jax.jit(
-        lambda obs, weights, learner_step, seed: exploration_lib.select_action(
-            obs,
-            seed=seed,
-            policy_fn=exploration_lib.epsilon_greedy_policy(
-                qvalue_net=qvalue_net,
-                qvalue_weights=weights,
-                epsilon=epsilon_fn(learner_step))))
-    buffer_transition = jax.jit(lambda rb, t: rb.with_transition(t))
-    update_network = jax.jit(lambda l: update_qvalue_network(
-        learner=l,
-        qvalue_net=qvalue_net,
-        qvalue_optimizer=qvalue_optimizer,
-        gradient_batch_size=gradient_batch_size,
-        discount_factor=env.discount_factor,
-        target_weights_decay=target_weights_decay))
-
-    def update_learner(learner: DeepQLearner) -> DeepQLearner:
-        seed, next_seed = jax.random.split(learner.seed)
-        state = learner.agent_states
-        if state.done:
-            state = env.reset()
-        action = select_action(state.observation,
-                               weights=learner.qvalue_weights,
-                               learner_step=learner.num_steps,
-                               seed=seed)
-        next_state = env.step(action)
-        updated_replay_buffer = buffer_transition(
-            learner.replay_buffer,
-            replay_buffer.Transition(state.minimize(),
-                                     action,
-                                     next_state.minimize(),
-                                     td_error=0.))
-        learner = dataclasses.replace(learner,
-                                      last_action=action,
-                                      agent_states=next_state,
-                                      replay_buffer=updated_replay_buffer,
-                                      num_steps=learner.num_steps + 1,
-                                      seed=next_seed)
-        return update_network(learner)
-
-    return update_learner

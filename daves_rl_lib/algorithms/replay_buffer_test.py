@@ -7,24 +7,27 @@ import numpy as np
 from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib.algorithms import replay_buffer
+from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import test_util
 
 
 def dummy_transitions(num_transitions, seed, action_is_vector=True):
-    states = jax.random.randint(seed,
-                                shape=[num_transitions],
-                                minval=0,
-                                maxval=1000)
+    observations = jax.random.randint(seed,
+                                      shape=[num_transitions],
+                                      minval=0,
+                                      maxval=1000)
     actions = jax.random.randint(
         seed,
         shape=[num_transitions, 1] if action_is_vector else [num_transitions],
         minval=-10,
         maxval=10)
-    return replay_buffer.Transition(
-        state=states,
+    return environment_lib.Transition(
+        observation=observations,
         action=actions,
-        next_state=states + (actions[..., 0] if action_is_vector else actions),
-        td_error=jnp.zeros([num_transitions]))
+        next_observation=observations +
+        (actions[..., 0] if action_is_vector else actions),
+        done=jnp.zeros([num_transitions], dtype=bool),
+        reward=jnp.zeros([num_transitions]))
 
 
 class ReplayBufferTests(test_util.TestCase):
@@ -35,10 +38,10 @@ class ReplayBufferTests(test_util.TestCase):
         buffer_size = 32
         buffer = replay_buffer.ReplayBuffer.initialize_empty(
             size=buffer_size,
-            dummy_state=jnp.array(1),
-            action_shape=(1,) if action_is_vector else ())
+            observation=jnp.array(1),
+            action=jnp.zeros((1,) if action_is_vector else ()))
         self.assertEqual(buffer.size, buffer_size)
-        self.assertEqual(buffer.transitions.state.shape, (buffer_size,))
+        self.assertEqual(buffer.transitions.observation.shape, (buffer_size,))
         self.assertEqual(buffer.index, 0)
         self.assertFalse(buffer.is_full)
 
@@ -57,7 +60,7 @@ class ReplayBufferTests(test_util.TestCase):
     def test_wrap_around(self, with_transitions):
         buffer_size = 32
         buffer = replay_buffer.ReplayBuffer.initialize_empty(
-            size=buffer_size, dummy_state=jnp.array(1), action_shape=())
+            size=buffer_size, observation=jnp.array(1), action=jnp.zeros([]))
         transitions = dummy_transitions(num_transitions=buffer_size - 5,
                                         seed=test_util.test_seed(),
                                         action_is_vector=False)
@@ -70,23 +73,25 @@ class ReplayBufferTests(test_util.TestCase):
         self.assertEqual(buffer.index, buffer_size - 10)
         self.assertTrue(buffer.is_full)
         # First five transitions are added to the end of the array.
-        self.assertAllEqual(transitions.state[:5],
-                            buffer.transitions.state[-5:])
+        self.assertAllEqual(transitions.observation[:5],
+                            buffer.transitions.observation[-5:])
         # Remaining transitions wrap around to the beginning.
-        self.assertAllEqual(transitions.state[5:],
-                            buffer.transitions.state[:buffer_size - 10])
+        self.assertAllEqual(transitions.observation[5:],
+                            buffer.transitions.observation[:buffer_size - 10])
         # The wraparound doesn't fully overwrite the previous entries, so they
         # should still be there.
-        self.assertAllEqual(transitions.state[-5:],
-                            buffer.transitions.state[-10:-5])
+        self.assertAllEqual(transitions.observation[-5:],
+                            buffer.transitions.observation[-10:-5])
 
     def test_uniform_sampling(self):
         buffer = replay_buffer.ReplayBuffer.initialize_empty(
-            size=2, dummy_state=jnp.array(1.), action_shape=(1,))
-        transitions = replay_buffer.Transition(state=jnp.array([1.]),
-                                               action=jnp.array([[0]]),
-                                               next_state=jnp.array([2.]),
-                                               td_error=jnp.zeros([1]))
+            size=2, observation=jnp.array(1.), action=jnp.zeros((1,)))
+        transitions = environment_lib.Transition(
+            observation=jnp.array([1.]),
+            action=jnp.array([[0]]),
+            next_observation=jnp.array([2.]),
+            reward=jnp.zeros([1]),
+            done=jnp.zeros([1], dtype=bool))
         buffer = buffer.with_transitions(transitions)
         self.assertFalse(buffer.is_full)
 
@@ -94,50 +99,28 @@ class ReplayBufferTests(test_util.TestCase):
         # entries.
         transition = buffer.sample_uniform(seed=test_util.test_seed(),
                                            batch_shape=())
-        self.assertEqual(transition.state.shape, ())
+        self.assertEqual(transition.observation.shape, ())
 
         transitions = buffer.sample_uniform(seed=test_util.test_seed(),
                                             batch_shape=[100])
-        self.assertEqual(transitions.state.shape, (100,))
-        self.assertEqual(np.sum(transitions.state == 1.), 100.)
+        self.assertEqual(transitions.observation.shape, (100,))
+        self.assertEqual(np.sum(transitions.observation == 1.), 100.)
 
         # Fill the buffer.
-        more_transitions = replay_buffer.Transition(
-            state=jnp.array([2., 3.]),
+        more_transitions = environment_lib.Transition(
+            observation=jnp.array([2., 3.]),
             action=jnp.array([[0], [0]]),
-            next_state=jnp.array([3., 4.]),
-            td_error=jnp.zeros([2]))
+            next_observation=jnp.array([3., 4.]),
+            reward=jnp.zeros([2]),
+            done=jnp.zeros([2], dtype=bool))
         buffer = buffer.with_transitions(more_transitions)
         self.assertTrue(buffer.is_full)
         self.assertEqual(buffer.index, 1)
 
         transitions = buffer.sample_uniform(seed=test_util.test_seed(),
                                             batch_shape=[100])
-        twos = np.sum(transitions.state == 2.)
-        threes = np.sum(transitions.state == 3.)
+        twos = np.sum(transitions.observation == 2.)
+        threes = np.sum(transitions.observation == 3.)
         self.assertGreater(twos, 40)
         self.assertGreater(threes, 40)
         self.assertEqual(twos + threes, 100)
-
-    def test_structured_state(self):
-        dummy_state = {'a': jnp.array(1.), 'b': jnp.zeros([2, 3])}
-        buffer = replay_buffer.ReplayBuffer.initialize_empty(
-            size=7, dummy_state=dummy_state, action_shape=())
-        self.assertShapeNested(buffer.transitions.state, {
-            'a': [7],
-            'b': [7, 2, 3]
-        })
-        self.assertShapeNested(buffer.transitions.next_state, {
-            'a': [7],
-            'b': [7, 2, 3]
-        })
-        self.assertEqual(buffer.transitions.action.shape, (7,))
-
-        dummy_transition = replay_buffer.Transition(state=dummy_state,
-                                                    next_state=dummy_state,
-                                                    action=jnp.zeros([]),
-                                                    td_error=jnp.zeros([]))
-        buffer = buffer.with_transition(dummy_transition)
-        sampled_transition = buffer.sample_uniform(seed=test_util.test_seed(),
-                                                   batch_shape=())
-        self.assertAllEqualNested(dummy_transition, sampled_transition)

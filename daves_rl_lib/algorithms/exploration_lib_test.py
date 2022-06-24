@@ -39,7 +39,8 @@ class ExplorationTests(test_util.TestCase):
                                                     best_actions[..., None],
                                                     axis=-1)[..., 0]
         if num_actions > 1:
-            self.assertAllClose(probs_of_best_actions,
-                                jnp.ones(batch_shape) * (1 - epsilon))
+            self.assertAllClose(
+                probs_of_best_actions,
+                jnp.ones(batch_shape) * (1 - epsilon) + epsilon / num_actions)
         else:
             self.assertAllClose(probs_of_best_actions, 1.)
