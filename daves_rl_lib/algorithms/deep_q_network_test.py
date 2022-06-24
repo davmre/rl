@@ -23,31 +23,6 @@ from daves_rl_lib.internal import test_util
 
 class DQNTests(test_util.TestCase):
 
-    def _setup_one_step_learner(self,
-                                env,
-                                buffer_size,
-                                gradient_batch_size,
-                                epsilon,
-                                target_weights_decay,
-                                learning_rate=1.0):
-
-        agent = deep_q_network.DQNAgent(
-            qvalue_net=networks.make_model([env.action_space.num_actions],
-                                           obs_size=env.observation_size),
-            qvalue_optimizer=optax.adam(learning_rate),
-            replay_buffer_size=buffer_size,
-            gradient_batch_size=gradient_batch_size,
-            epsilon=epsilon,
-            target_weights_decay=target_weights_decay,
-            discount_factor=env.discount_factor)
-
-        weights = agent.init_weights(
-            seed=test_util.test_seed(),
-            dummy_observation=env.reset(test_util.test_seed()).observation,
-            dummy_action=env.action_space.dummy_action())
-
-        return agent, weights
-
     def test_transitions_are_collected_in_buffer(self):
         env = trivial_environment.OneStepEnvironment(discount_factor=0.9)
         batch_size = 6
@@ -55,14 +30,16 @@ class DQNTests(test_util.TestCase):
         states = env.reset(seed=test_util.test_seed(), batch_size=batch_size)
         initial_state_obs = states.observation[0, ...]
 
-        agent = deep_q_network.DQNAgent(qvalue_net=networks.make_model(
-            [env.action_space.num_actions], obs_size=env.observation_size),
-                                        qvalue_optimizer=optax.adam(0.1),
-                                        replay_buffer_size=buffer_size,
-                                        gradient_batch_size=8,
-                                        epsilon=0.,
-                                        target_weights_decay=0.9,
-                                        discount_factor=env.discount_factor)
+        agent = deep_q_network.DQNAgent(
+            qvalue_net=networks.make_model(
+                [env.action_space.num_actions],  # type: ignore
+                obs_size=env.observation_size),
+            qvalue_optimizer=optax.adam(0.1),
+            replay_buffer_size=buffer_size,
+            gradient_batch_size=8,
+            epsilon=0.,
+            target_weights_decay=0.9,
+            discount_factor=env.discount_factor)
 
         weights = agent.init_weights(
             seed=test_util.test_seed(),
@@ -105,14 +82,16 @@ class DQNTests(test_util.TestCase):
         buffer_size = 8
         states = env.reset(seed=test_util.test_seed())
 
-        agent = deep_q_network.DQNAgent(qvalue_net=networks.make_model(
-            [env.action_space.num_actions], obs_size=env.observation_size),
-                                        qvalue_optimizer=optax.adam(0.5),
-                                        replay_buffer_size=buffer_size,
-                                        gradient_batch_size=4,
-                                        epsilon=0.,
-                                        target_weights_decay=0.5,
-                                        discount_factor=discount_factor)
+        agent = deep_q_network.DQNAgent(
+            qvalue_net=networks.make_model(
+                [env.action_space.num_actions],  # type: ignore
+                obs_size=env.observation_size),
+            qvalue_optimizer=optax.adam(0.5),
+            replay_buffer_size=buffer_size,
+            gradient_batch_size=4,
+            epsilon=0.,
+            target_weights_decay=0.5,
+            discount_factor=discount_factor)
 
         weights = agent.init_weights(
             seed=test_util.test_seed(),
@@ -167,14 +146,16 @@ class DQNTests(test_util.TestCase):
         states = env.reset(seed=test_util.test_seed(), batch_size=8)
         initial_state_obs = states.observation[0, ...]
 
-        agent = deep_q_network.DQNAgent(qvalue_net=networks.make_model(
-            [env.action_space.num_actions], obs_size=env.observation_size),
-                                        qvalue_optimizer=optax.adam(0.1),
-                                        replay_buffer_size=buffer_size,
-                                        gradient_batch_size=8,
-                                        epsilon=epsilon,
-                                        target_weights_decay=0.9,
-                                        discount_factor=env.discount_factor)
+        agent = deep_q_network.DQNAgent(
+            qvalue_net=networks.make_model(
+                [env.action_space.num_actions],  # type: ignore
+                obs_size=env.observation_size),
+            qvalue_optimizer=optax.adam(0.1),
+            replay_buffer_size=buffer_size,
+            gradient_batch_size=8,
+            epsilon=epsilon,
+            target_weights_decay=0.9,
+            discount_factor=env.discount_factor)
 
         weights = agent.init_weights(
             seed=test_util.test_seed(),
@@ -213,14 +194,16 @@ class DQNTests(test_util.TestCase):
         state = env.reset(seed=test_util.test_seed())
         initial_state_obs = state.observation
 
-        agent = deep_q_network.DQNAgent(qvalue_net=networks.make_model(
-            [env.action_space.num_actions], obs_size=env.observation_size),
-                                        qvalue_optimizer=optax.adam(0.1),
-                                        replay_buffer_size=buffer_size,
-                                        gradient_batch_size=8,
-                                        epsilon=epsilon,
-                                        target_weights_decay=0.9,
-                                        discount_factor=env.discount_factor)
+        agent = deep_q_network.DQNAgent(
+            qvalue_net=networks.make_model(
+                [env.action_space.num_actions],  # type: ignore
+                obs_size=env.observation_size),
+            qvalue_optimizer=optax.adam(0.1),
+            replay_buffer_size=buffer_size,
+            gradient_batch_size=8,
+            epsilon=epsilon,
+            target_weights_decay=0.9,
+            discount_factor=env.discount_factor)
 
         weights = agent.init_weights(
             seed=test_util.test_seed(),
