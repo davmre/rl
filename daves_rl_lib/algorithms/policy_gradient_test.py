@@ -39,7 +39,7 @@ class PolicyGradientTests(test_util.TestCase):
 
         agent = policy_gradient.PolicyGradientAgent(
             policy_net=networks.make_model(
-                [32, env.action_space.num_actions],
+                [32, env.action_space.num_actions],  # type: ignore
                 obs_size=env.observation_size,
                 activate_final=networks.categorical_from_logits),
             policy_optimizer=optax.adam(0.1),

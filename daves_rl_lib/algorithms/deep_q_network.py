@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 from flax import struct
 import optax
+from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import agent_lib
@@ -67,7 +68,9 @@ class DQNAgent(agent_lib.Agent):
             num_steps=jnp.zeros([], dtype=jnp.int32),
             seed=seed)
 
-    def _action_dist(self, observation, weights: DQNWeights):
+    def _action_dist(
+            self, weights: DQNWeights,
+            observation: jnp.ndarray) -> tfp.distributions.Distribution:
         policy_fn = exploration_lib.epsilon_greedy_policy(
             qvalue_net=self.qvalue_net,
             qvalue_weights=weights.qvalue_weights,

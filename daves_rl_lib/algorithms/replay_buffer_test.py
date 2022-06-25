@@ -102,7 +102,7 @@ class ReplayBufferTests(test_util.TestCase):
         self.assertEqual(transition.observation.shape, ())
 
         transitions = buffer.sample_uniform(seed=test_util.test_seed(),
-                                            batch_shape=[100])
+                                            batch_shape=(100,))
         self.assertEqual(transitions.observation.shape, (100,))
         self.assertEqual(np.sum(transitions.observation == 1.), 100.)
 
@@ -118,7 +118,7 @@ class ReplayBufferTests(test_util.TestCase):
         self.assertEqual(buffer.index, 1)
 
         transitions = buffer.sample_uniform(seed=test_util.test_seed(),
-                                            batch_shape=[100])
+                                            batch_shape=(100,))
         twos = np.sum(transitions.observation == 2.)
         threes = np.sum(transitions.observation == 3.)
         self.assertGreater(twos, 40)

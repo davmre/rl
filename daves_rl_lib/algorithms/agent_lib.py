@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Optional
 
 import jax
 from jax import numpy as jnp
@@ -13,27 +13,31 @@ from daves_rl_lib.internal import type_util
 
 class Agent(object):
 
-    def init_weights(self, seed: type_util.KeyArray,
-                     dummy_observation: jnp.ndarray, dummy_action: jnp.ndarray):
+    def init_weights(self,
+                     seed: type_util.KeyArray,
+                     dummy_observation: Optional[jnp.ndarray] = None,
+                     dummy_action: Optional[jnp.ndarray] = None,
+                     **kwargs):
         return self._init_weights(seed,
                                   dummy_observation=dummy_observation,
-                                  dummy_action=dummy_action)
+                                  dummy_action=dummy_action,
+                                  **kwargs)
 
     def _init_weights(self, seed: type_util.KeyArray,
-                      dummy_observation: jnp.ndarray,
-                      dummy_action: jnp.ndarray):
+                      dummy_observation: Optional[jnp.ndarray],
+                      dummy_action: Optional[jnp.ndarray]):
         raise NotImplementedError()
 
-    def action_dist(self, observation: jnp.ndarray,
-                    weights) -> tfp.distributions.Distribution:
-        return self._action_dist(observation, weights)
+    def action_dist(self, weights,
+                    observation: jnp.ndarray) -> tfp.distributions.Distribution:
+        return self._action_dist(weights, observation)
 
-    def _action_dist(self, observation: jnp.ndarray, weights):
+    def _action_dist(self, weights, observation: jnp.ndarray):
         raise NotImplementedError()
 
-    def update(self, weights: Any,
-               transition: environment_lib.Transition) -> Any:
-        return self._update(weights, transition)
+    def update(self, weights: Any, transition: environment_lib.Transition,
+               **kwargs) -> Any:
+        return self._update(weights, transition, **kwargs)
 
     def _update(self, weights, transition):
         raise NotImplementedError()
@@ -52,8 +56,8 @@ class EpisodicAgent(Agent):
         super().__init__()
 
     def init_weights(self, seed: type_util.KeyArray,
-                     dummy_observation: jnp.ndarray,
-                     dummy_action: jnp.ndarray) -> EpisodicMemoryWeights:
+                     dummy_observation: jnp.ndarray, dummy_action: jnp.ndarray,
+                     **kwargs) -> EpisodicMemoryWeights:
         """
         If the agent will be run in a batch environment, the dummy observation and
         action should have the corresponding batch shape.
@@ -66,12 +70,12 @@ class EpisodicAgent(Agent):
             agent_weights=self._init_weights(
                 seed,
                 dummy_observation=dummy_observation,
-                dummy_action=dummy_action))
+                dummy_action=dummy_action,
+                **kwargs))
 
-    def action_dist(
-            self, observation: jnp.ndarray,
-            weights: EpisodicMemoryWeights) -> tfp.distributions.Distribution:
-        return self._action_dist(observation, weights.agent_weights)
+    def action_dist(self, weights: EpisodicMemoryWeights,
+                    observation: jnp.ndarray) -> tfp.distributions.Distribution:
+        return self._action_dist(weights.agent_weights, observation)
 
     def update(self, weights: EpisodicMemoryWeights,
                transition: environment_lib.Transition) -> EpisodicMemoryWeights:

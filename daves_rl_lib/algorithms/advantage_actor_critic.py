@@ -8,69 +8,179 @@ from flax import struct
 import optax
 
 from daves_rl_lib import networks
+from daves_rl_lib.algorithms import agent_lib
 from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import type_util
 from daves_rl_lib.internal import util
 
 
 @struct.dataclass
-class A2CTraceableQuantities:
-    actions: jnp.ndarray
-    agent_states: environment_lib.State
-    state_values: jnp.ndarray
-    value_weights: Any
-    value_grad: Any
-    reward_to_go: jnp.ndarray
-    returns: jnp.ndarray
-    advantage: jnp.ndarray
-    policy_weights: Any
-    policy_grad: Any
-    policy_entropy: jnp.ndarray
-    entropy_grad: Any
-    regularized_policy_grad: Any
-    num_nonterminal_steps: jnp.ndarray
-
-
-A2CTraceFn = Callable[[A2CTraceableQuantities], type_util.PyTree]
-
-
-@struct.dataclass
-class A2CLearner:
-    agent_states: environment_lib.State
+class A2CWeights:
     policy_weights: Any
     policy_optimizer_state: Any
     value_weights: Any
     value_optimizer_state: Any
+    steps_buffer: replay_buffer.ReplayBuffer
 
 
-def initialize_learner(
-        env,
-        policy_net,  # Should include final logits.
-        value_net,  # Should include final [1] output.
-        policy_optimizer,
-        value_optimizer,
-        batch_size=32,
-        seed=jax.random.PRNGKey(0),
-) -> A2CLearner:
-    policy_seed, value_seed, state_seed = jax.random.split(seed, 3)
-    policy_weights = policy_net.init(policy_seed)
-    value_weights = value_net.init(value_seed)
-    return A2CLearner(
-        agent_states=env.reset(batch_size=batch_size, seed=state_seed),
-        value_weights=value_weights,
-        value_optimizer_state=value_optimizer.init(value_weights),
-        policy_weights=policy_weights,
-        policy_optimizer_state=policy_optimizer.init(policy_weights))
+class A2CAgent(agent_lib.Agent):
+
+    def __init__(
+            self,
+            policy_net,  # Should include final logits.
+            value_net,  # Should include final [1] output.
+            policy_optimizer,
+            value_optimizer,
+            steps_per_update: int,
+            entropy_regularization: float = 0.01,
+            discount_factor=1.):
+        self._policy_net = policy_net
+        self._value_net = value_net
+        self._policy_optimizer = policy_optimizer
+        self._value_optimizer = value_optimizer
+        self._steps_per_update = steps_per_update
+        self._entropy_regularization = entropy_regularization
+        self._discount_factor = discount_factor
+        super().__init__()
+
+    @property
+    def policy_net(self):
+        return self._policy_net
+
+    @property
+    def value_net(self):
+        return self._value_net
+
+    def _init_weights(self, seed: type_util.KeyArray,
+                      dummy_observation: jnp.ndarray, dummy_action: jnp.ndarray,
+                      batch_size: int) -> A2CWeights:
+        policy_seed, value_seed, state_seed = jax.random.split(seed, 3)
+        policy_weights = self._policy_net.init(policy_seed)
+        value_weights = self._value_net.init(value_seed)
+        return A2CWeights(
+            value_weights=value_weights,
+            value_optimizer_state=self._value_optimizer.init(value_weights),
+            policy_weights=policy_weights,
+            policy_optimizer_state=self._policy_optimizer.init(policy_weights),
+            steps_buffer=jax.vmap(
+                lambda _: replay_buffer.ReplayBuffer.initialize_empty(
+                    size=self._steps_per_update,
+                    observation=dummy_observation,
+                    action=dummy_action))(jnp.arange(batch_size)))
+
+    def _action_dist(self, weights: A2CWeights,
+                     observation: jnp.ndarray) -> jnp.ndarray:
+        return self._policy_net.apply(weights.policy_weights, observation)
+
+    def _update(self, weights: A2CWeights,
+                transition: environment_lib.Transition):
+        """_summary_
+
+        Args:
+            weights: _description_
+            transition: batch of transitions from acting in a batch of states.
+        """
+        weights = dataclasses.replace(
+            weights,
+            steps_buffer=jax.vmap(lambda b, t: b.with_transition(t))(
+                weights.steps_buffer, transition))
+        return jax.lax.cond(
+            # Formally check if any worker's buffer is full, though since all
+            # buffers are the same size they must fill (and be reset)
+            # at the same time.
+            jnp.any(weights.steps_buffer.is_full),
+            lambda: self._update_weights_and_reset_buffer(weights),
+            lambda: weights)
+
+    def _update_weights_and_reset_buffer(self,
+                                         weights: A2CWeights) -> A2CWeights:
+        # Compute and aggregate gradients across workers.
+        value_grads, policy_grads = jax.vmap(
+            lambda transitions: self._single_worker_gradients(
+                transitions=transitions,
+                policy_weights=weights.policy_weights,
+                value_weights=weights.value_weights))(
+                    weights.steps_buffer.transitions)
+        value_grad, policy_grad = jax.tree_util.tree_map(
+            lambda x: jnp.mean(x, axis=0), (value_grads, policy_grads))
+
+        value_updates, value_optimizer_state = self._value_optimizer.update(
+            value_grad, weights.value_optimizer_state)
+        value_weights = optax.apply_updates(weights.value_weights,
+                                            value_updates)
+        policy_updates, policy_optimizer_state = self._policy_optimizer.update(
+            # We want to *maximize* reward, rather than minimize loss, so
+            # pass negative gradients to the optimizer.
+            jax.tree_util.tree_map(lambda g: -g, policy_grad),
+            weights.policy_optimizer_state)
+        policy_weights = optax.apply_updates(weights.policy_weights,
+                                             policy_updates)
+
+        return A2CWeights(policy_weights=policy_weights,
+                          policy_optimizer_state=policy_optimizer_state,
+                          value_weights=value_weights,
+                          value_optimizer_state=value_optimizer_state,
+                          steps_buffer=jax.vmap(lambda b: b.reset())(
+                              weights.steps_buffer))
+
+    def _single_worker_gradients(self, transitions: environment_lib.Transition,
+                                 policy_weights, value_weights):
+        state_values, values_grad = jax.vmap(lambda s: jax.value_and_grad(
+            lambda w: self.value_net.apply(w, s)[0])(value_weights))(
+                transitions.observation)
+
+        final_state_value = self.value_net.apply(
+            value_weights, transitions.next_observation[-1])[0]
+
+        estimated_returns = episode_reward_to_go(
+            reward=jnp.concatenate(
+                [transitions.reward,
+                 jnp.array([final_state_value])]),
+            done=jnp.concatenate([transitions.done,
+                                  jnp.array([False])]),
+            discount_factor=self._discount_factor)[:-1]
+
+        advantage = estimated_returns - state_values
+
+        # Value and policy gradients are computed at a per-step scale, so that
+        # increasing `num_steps` does *not* increase the scale of the gradients;
+        # it just reduces their variance. It's not clear to me if this makes
+        # sense - typically when we increase `num_steps` per update we
+        # decrease the number of outer-loop updates, and debatably we want
+        # the 'total learning' to remain constant under that adjustment, which
+        # would suggest increasing the scale. However, the current approach is
+        # most consistent with the style convention that batch size parameters
+        # (which `num_steps` sort-of is) are independent of learning rates.
+        value_grad = jax.tree_util.tree_map(
+            (lambda x: jnp.mean(util.batch_multiply(-advantage, x), axis=0)),
+            values_grad)
+
+        policy_grad = batch_policy_gradient(self.policy_net,
+                                            policy_weights,
+                                            batch_obs=transitions.observation,
+                                            batch_actions=transitions.action,
+                                            batch_advantages=advantage)
+        policy_entropy, entropy_grad = jax.value_and_grad(lambda w: jnp.mean(
+            self.policy_net.apply(w, transitions.observation).entropy()))(
+                policy_weights)
+        regularized_policy_grad = jax.tree_util.tree_map(
+            lambda a, b: a + self._entropy_regularization * b, policy_grad,
+            entropy_grad)
+        return value_grad, policy_grad
 
 
-def rewards_to_go(rewards, discount_factor):
-    size = rewards.shape[0]
-    discount_square = jnp.array(
-        [[discount_factor**(j - i) if j >= i else 0.0
-          for j in range(size)]
-         for i in range(size)])
-    return jnp.sum(rewards[None, ...] * discount_square, axis=-1)
+def episode_reward_to_go(reward, done, discount_factor):
+    size = reward.shape[0]
+    num_future_dones = jnp.cumsum(done[::-1])[::-1]
+    episode_discount_square = jnp.array([[
+        discount_factor**(j - i) *
+        (num_future_dones[i] == num_future_dones[j]) if j >= i else 0.0
+        for j in range(size)
+    ]
+                                         for i in range(size)])
+    return jnp.sum(episode_discount_square * reward[None, ...], axis=-1)
 
 
 def batch_policy_gradient(policy_net, policy_weights, batch_obs, batch_actions,
@@ -91,174 +201,3 @@ def batch_policy_gradient(policy_net, policy_weights, batch_obs, batch_actions,
         return jnp.mean(scaled_lps)
 
     return jax.grad(fn_of_weights)(policy_weights)
-
-
-def make_advantage_actor_critic_single_minibatch(
-        env: environment_lib.Environment,
-        num_steps: int,
-        policy_net: networks.FeedForwardModel,
-        policy_weights,
-        value_net: networks.FeedForwardModel,
-        value_weights,
-        entropy_regularization: float = 0.01,
-        trace_fn: Optional[Callable] = None) -> Callable:
-
-    if trace_fn is None:
-        trace_fn = lambda tq: ()
-
-    def run_minibatch(agent_state):
-        initial_agent_state = env.reset_if_done(agent_state)
-
-        def loop_body(agent_state, _):
-            seed, next_seed = jax.random.split(agent_state.seed)
-            action = exploration_lib.select_action(
-                agent_state.observation,
-                policy_fn=lambda obs: policy_net.apply(policy_weights, obs),
-                seed=seed)
-            next_state = env.step(
-                dataclasses.replace(agent_state, seed=next_seed), action)
-            return next_state, (action, next_state)
-
-        final_state, (actions, non_initial_agent_states) = jax.lax.scan(
-            loop_body, init=initial_agent_state, xs=jnp.arange(num_steps))
-
-        # length `num_steps + 1` including both initial and final (pre-reset)
-        # states
-        agent_states = jax.tree_util.tree_map(
-            lambda a, b: jnp.concatenate([a[None, ...], b], axis=0),
-            initial_agent_state, non_initial_agent_states)
-        num_nonterminal_steps = (num_steps - jnp.sum(agent_states.done[:-1]))
-        state_values, values_grad = jax.vmap(lambda s: jax.value_and_grad(
-            lambda w: value_net.apply(w, s)[0])(value_weights))(
-                agent_states.observation)
-
-        final_state_values = jnp.where(agent_states.done[-1], 0.,
-                                       state_values[-1])
-        # Quantities with shape `[num_steps]`:
-        td_horizon = jnp.arange(num_steps, 0, -1)
-        rtg = rewards_to_go(agent_states.reward[1:],
-                            discount_factor=env.discount_factor)
-        returns = (rtg + env.discount_factor**td_horizon * final_state_values)
-        advantage = jnp.where(agent_states.done[:-1], 0.,
-                              returns - state_values[:-1])
-
-        # Value and policy gradients are computed at a per-step scale, so that
-        # increasing `num_steps` does *not* increase the scale of the gradients;
-        # it just reduces their variance. It's not clear to me if this makes
-        # sense - typically when we increase `num_steps` per update we
-        # decrease the number of outer-loop updates, and debatably we want
-        # the 'total learning' to remain constant under that adjustment, which
-        # would suggest increasing the scale. However, the current approach is
-        # most consistent with the style convention that batch size parameters
-        # (which `num_steps` sort-of is) are independent of learning rates.
-        value_grad = jax.tree_util.tree_map(
-            (lambda x: jnp.sum(util.batch_multiply(-advantage, x[:-1]), axis=0)
-             / num_nonterminal_steps), values_grad)
-
-        policy_grad = batch_policy_gradient(
-            policy_net,
-            policy_weights,
-            batch_obs=agent_states.observation[:-1, ...],
-            batch_actions=actions,
-            batch_advantages=advantage)
-        policy_entropy, entropy_grad = jax.value_and_grad(lambda w: jnp.sum(
-            jnp.where(
-                agent_states.done[:-1], 0.,
-                policy_net.apply(w, agent_states.observation[:-1]).entropy()) /
-            num_nonterminal_steps))(policy_weights)
-        regularized_policy_grad = jax.tree_util.tree_map(
-            lambda a, b: a + entropy_regularization * b, policy_grad,
-            entropy_grad)
-
-        diagnostics = trace_fn(
-            A2CTraceableQuantities(actions, agent_states, state_values,
-                                   value_weights, value_grad, rtg, returns,
-                                   advantage, policy_weights, policy_grad,
-                                   policy_entropy, entropy_grad,
-                                   regularized_policy_grad,
-                                   num_nonterminal_steps))
-
-        return final_state, value_grad, regularized_policy_grad, diagnostics
-
-    return run_minibatch
-
-
-def make_advantage_actor_critic_batch_step(
-        env: environment_lib.Environment,
-        num_steps: int,
-        policy_net: networks.FeedForwardModel,
-        policy_optimizer,
-        value_net: networks.FeedForwardModel,
-        value_optimizer,
-        entropy_regularization: float = 0.,
-        trace_fn: A2CTraceFn = lambda *a, **kw: (),
-) -> Callable:
-
-    def scan_body(learner, _=None):
-        new_agent_states, value_grads, policy_grads, diagnostics = jax.vmap(
-            make_advantage_actor_critic_single_minibatch(
-                env=env,
-                num_steps=num_steps,
-                policy_net=policy_net,
-                policy_weights=learner.policy_weights,
-                value_net=value_net,
-                value_weights=learner.value_weights,
-                entropy_regularization=entropy_regularization,
-                trace_fn=trace_fn))(learner.agent_states)
-        value_grad, policy_grad = jax.tree_util.tree_map(
-            lambda x: jnp.mean(x, axis=0), (value_grads, policy_grads))
-
-        value_updates, value_optimizer_state = value_optimizer.update(
-            value_grad, learner.value_optimizer_state)
-        value_weights = optax.apply_updates(learner.value_weights,
-                                            value_updates)
-        policy_updates, policy_optimizer_state = policy_optimizer.update(
-            # We want to *maximize* reward, rather than minimize loss, so
-            # pass negative gradients to the optimizer.
-            jax.tree_util.tree_map(lambda g: -g, policy_grad),
-            learner.policy_optimizer_state)
-        policy_weights = optax.apply_updates(learner.policy_weights,
-                                             policy_updates)
-
-        return (
-            A2CLearner(agent_states=new_agent_states,
-                       policy_weights=policy_weights,
-                       policy_optimizer_state=policy_optimizer_state,
-                       value_weights=value_weights,
-                       value_optimizer_state=value_optimizer_state),
-            diagnostics,
-        )
-
-    return scan_body
-
-
-def concatenate_diagnostic_steps(x, num_steps=None):
-    """Reconstructs continuous diagnostics from `scan` output.
-
-    Running the batch steps produced by `make_advantage_actor_critic_batch_step`
-    in a `scan` loop returns traced diagnostics of shape
-    `[scan_iterations, batch_size, num_steps + 1, ...]`,
-    in which each scan iteration takes `num_steps` steps and (for quantities
-    based on `agent_states`) also traces
-    diagnostics for the initial state, so we get `num_steps + 1` diagnostics
-    for each batch element at each iteration.
-
-    This utility reshapes a diagnostic to have shape
-    `[batch_size, scan_steps * num_steps, ...]`, giving a full trace
-    for each batch element.
-
-    Example usage:
-
-    ```python
-    learner, diagnostics = jax.lax.scan(scan_body, learner, jnp.arange(1000))
-    diagnostics = jax.tree_util.tree_map(concatenate_diagnostic_steps,
-                                         diagnostics)
-    ```
-    """
-    scan_iterations, batch_size, num_steps_plus1 = x.shape[:3]
-    if num_steps is None:
-        num_steps = num_steps_plus1 - 1
-    trimmed_x_with_batch_size_first = jnp.transpose(
-        x[:, :, -num_steps:, ...], axes=(1, 0) + tuple(range(2, len(x.shape))))
-    return jnp.reshape(trimmed_x_with_batch_size_first,
-                       (batch_size, scan_iterations * num_steps) + x.shape[3:])

@@ -8,7 +8,7 @@ def jax_driver(env: environment_lib.Environment, agent: agent_lib.Agent):
 
     def advance_env(state, weights, seed):
         state = env.reset_if_done(state)
-        action = agent.action_dist(state.observation, weights).sample(seed=seed)
+        action = agent.action_dist(weights, state.observation).sample(seed=seed)
         next_state = env.step(state, action)
         return state, action, next_state
 
@@ -40,7 +40,7 @@ def stateful_driver(env: environment_lib.ExternalEnvironment,
                     agent: agent_lib.Agent,
                     jit_compile=True):
 
-    select_action = lambda obs, w, s: agent.action_dist(obs, w).sample(seed=s)
+    select_action = lambda w, obs, s: agent.action_dist(w, obs).sample(seed=s)
     update_weights = agent.update
 
     if jit_compile:
@@ -51,7 +51,7 @@ def stateful_driver(env: environment_lib.ExternalEnvironment,
         seed, next_seed = jax.random.split(seed, 2)
         if state.done:
             state = env.reset()
-        action = select_action(state.observation, weights, seed)
+        action = select_action(weights, state.observation, seed)
         next_state = env.step(action)
         transition = environment_lib.Transition(
             state.observation,

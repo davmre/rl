@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 from flax import struct
 import optax
+from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import agent_lib
@@ -49,8 +50,10 @@ class PolicyGradientAgent(agent_lib.EpisodicAgent):
             policy_weights=policy_weights,
             policy_optimizer_state=policy_optimizer_state)
 
-    def _action_dist(self, obs, weights: PolicyGradientAgentWeights):
-        return self.policy_net.apply(weights.policy_weights, obs)
+    def _action_dist(
+            self, weights: PolicyGradientAgentWeights,
+            observation: jnp.ndarray) -> tfp.distributions.Distribution:
+        return self.policy_net.apply(weights.policy_weights, observation)
 
     def _update_episode(
             self, weights: PolicyGradientAgentWeights,
