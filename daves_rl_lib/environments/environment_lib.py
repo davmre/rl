@@ -1,3 +1,4 @@
+from argparse import Action
 import dataclasses
 from typing import Any, Callable, Dict, Optional, Union
 
@@ -5,7 +6,6 @@ import jax
 from jax import numpy as jnp
 import numpy as np
 
-from brax import envs as brax_envs
 from flax import struct
 
 from daves_rl_lib.internal import type_util
@@ -27,12 +27,20 @@ class ActionSpace:
 
     Elements:
       shape: `tuple` of integers specifying the shape of an action.
+      minimum: optional array of shape `shape`, specifying the minimum value
+        of a continuous-valued action. (currently, discrete actions are always
+        integers in `{0, ..., num_actions - 1}`).
+      maximum: optional array of shape `shape`, specifying the maximum value
+        of a continuous-valued action. (currently, discrete actions are always
+        integers in `{0, ..., num_actions - 1}`).
       num_actions: optional `int` specifying the number of actions in a discrete
         action space. Note that discrete actions must (currently) have scalar
         shape; this is not explicitly checked but violations may lead to
         undefined behavior. If `None`, the action space is continuous.
     """
     shape: tuple = ()
+    minimum: Optional[jnp.ndarray] = None
+    maximum: Optional[jnp.ndarray] = None
     num_actions: Optional[int] = None
 
     @property
@@ -42,15 +50,6 @@ class ActionSpace:
     @property
     def is_discrete(self):
         return self.num_actions is not None
-
-    @staticmethod
-    def from_gym_space(gym_space):
-        if hasattr(gym_space, 'n'):
-            if gym_space.start != 0:
-                raise ValueError('Gym action space start must be 0.')
-            return ActionSpace(num_actions=gym_space.n)
-        raise NotImplementedError('Gym space type not supported:',
-                                  type(gym_space))
 
     def dummy_action(self, batch_size=None):
         return jnp.zeros(self.shape if batch_size is None else
@@ -93,28 +92,6 @@ class State:
     metrics: Dict[str, jnp.ndarray] = struct.field(default_factory=dict)
     info: Dict[str, Any] = struct.field(default_factory=dict)
 
-    @staticmethod
-    def from_brax_state(brax_state, num_steps, episode_return, seed):
-        """Constructs a state representation from a Brax state."""
-        return State(observation=brax_state.obs,
-                     num_steps=num_steps,
-                     seed=seed,
-                     reward=brax_state.reward,
-                     done=brax_state.done,
-                     unobserved=brax_state.qp,
-                     episode_return=episode_return,
-                     info=brax_state.info,
-                     metrics=brax_state.metrics)
-
-    def as_brax_state(self):
-        """Represents a state as a Brax state."""
-        return brax_envs.State(obs=self.observation,
-                               reward=jnp.asarray(self.reward),
-                               done=jnp.asarray(self.done),
-                               qp=self.unobserved,
-                               info=self.info,
-                               metrics=self.metrics)  # type: ignore
-
     def minimize(self):
         """Remove debugging information from the state."""
         return dataclasses.replace(self, metrics={}, info={})
@@ -134,9 +111,13 @@ class Environment(object):
     action_space: ActionSpace
     discount_factor: float = 1.0
 
-    def __init__(self, action_space, discount_factor=1.0):
+    def __init__(self,
+                 action_space,
+                 discount_factor=1.0,
+                 max_episode_length: Optional[int] = None):
         self.action_space = action_space
         self.discount_factor = discount_factor
+        self.max_episode_length = max_episode_length
 
     @property
     def observation_size(self) -> int:
@@ -186,6 +167,12 @@ class Environment(object):
             num_steps=state.num_steps + 1,
             episode_return=state.episode_return +
             self.discount_factor**(state.num_steps) * new_state.reward)
+        if self.max_episode_length is not None:
+            new_state = dataclasses.replace(
+                new_state,
+                done=jnp.logical_or(
+                    new_state.done,
+                    new_state.num_steps >= self.max_episode_length))
         # Replace step with no-op if the episode was already done.
         return util.tree_where(
             state.done,
@@ -201,62 +188,25 @@ class Environment(object):
         raise NotImplementedError('step() not implemented.')
 
 
-class BRAXEnvironment(Environment):
-    """Wrapper to represent a BRAX environment."""
-
-    def __init__(self, brax_env, discount_factor=1.0):
-        self._brax_env = brax_env
-        super().__init__(
-            action_space=ActionSpace(shape=(brax_env.action_size,)),
-            discount_factor=discount_factor)
-
-    def _reset(self, seed: type_util.KeyArray) -> State:
-        reset_seed, next_seed = jax.random.split(seed)
-        return State.from_brax_state(self._brax_env.reset(reset_seed),
-                                     num_steps=jnp.zeros([], dtype=jnp.int32),
-                                     episode_return=jnp.zeros(
-                                         [], dtype=jnp.float32),
-                                     seed=next_seed)
-
-    def _step(self, state: State, action: jnp.ndarray) -> State:
-        new_state = self._brax_env.step(state.as_brax_state(), action)
-        # Step and episode return are updated by the public caller.
-        return State.from_brax_state(new_state,
-                                     num_steps=state.num_steps,
-                                     episode_return=state.episode_return,
-                                     seed=state.seed)
-
-
 class ExternalEnvironment(object):
     """Represents an environment with external state."""
     action_space: ActionSpace
     discount_factor: float = 1.0
 
-    def __init__(self, action_space, discount_factor=1.0):
+    def __init__(self,
+                 action_space: ActionSpace,
+                 action_transform_fn: Optional[Callable] = None,
+                 max_episode_length: Optional[int] = None,
+                 discount_factor: float = 1.0):
         self.action_space = action_space
-        self.discount_factor = discount_factor
-
-    @property
-    def observation_size(self):
-        raise NotImplementedError('observation_size is not implemented')
-
-    def reset(self, seed=None, batch_size=None):
-        raise NotImplementedError('reset() not implemented.')
-
-    def step(self, action):
-        raise NotImplementedError('step() not implemented.')
-
-
-class GymEnvironment(ExternalEnvironment):
-    """Wraps an OpenAI Gym environment."""
-
-    def __init__(self, gym_env, discount_factor=1.):
-        self._gym_env = gym_env
         self._action_sequence = []
         self._initial_observation = None
-        super().__init__(action_space=ActionSpace.from_gym_space(
-            gym_env.action_space),
-                         discount_factor=discount_factor)
+        self._num_steps = jnp.array(0)
+        self._episode_return = jnp.array(0.)
+        self.discount_factor = discount_factor
+        self.action_transform_fn = (action_transform_fn
+                                    if action_transform_fn else lambda x: x)
+        self._max_episode_length = max_episode_length
 
     @property
     def observation_size(self):
@@ -264,32 +214,33 @@ class GymEnvironment(ExternalEnvironment):
             self.reset()
         return self._initial_observation.shape[-1]  # type: ignore
 
-    def step(self, action):
-        action = np.asarray(action)
-        self._action_sequence.append(action)
-        observation, reward, done, info = self._gym_env.step(action=action)
-        self._episode_return += self.discount_factor**self._num_steps * reward
-        self._num_steps += 1
-        return State(observation=observation,
-                     reward=reward,
-                     done=done,
-                     info=info,
-                     episode_return=self._episode_return,
-                     num_steps=jnp.asarray(self._num_steps),
-                     seed=0)
-
     def reset(self, seed=None, batch_size=None):
         if batch_size is not None:
-            raise ValueError('Batching gym environments is not supported.')
+            raise ValueError('Batching external environments is not supported.')
         self._action_sequence = []
-        self._episode_return = 0.
-        self._num_steps = 0
-        observation = self._gym_env.reset(seed=util.as_numpy_seed(seed))
-        self._initial_observation = observation
-        return State(observation=observation,
-                     reward=jnp.asarray(0),
-                     done=jnp.asarray(False),
-                     info={},
-                     episode_return=jnp.asarray(0.),
-                     num_steps=jnp.asarray(0),
-                     seed=0)
+        state = self._reset(seed=seed)
+        self._initial_observation = state.observation
+        self._episode_return = jnp.array(0.)
+        self._num_steps = jnp.array(0)
+        return state
+
+    def _reset(self, seed=None):
+        raise NotImplementedError('_reset() not implemented.')
+
+    def step(self, action):
+        self._action_sequence.append(action)
+        new_state = self._step(external_action=self.action_transform_fn(action))
+        self._episode_return += (self.discount_factor**self._num_steps *
+                                 new_state.reward)
+        self._num_steps += 1
+        done = new_state.done
+        if self._max_episode_length is not None:
+            done = jnp.logical_or(done,
+                                  self._num_steps >= self._max_episode_length)
+        return dataclasses.replace(new_state,
+                                   done=done,
+                                   episode_return=self._episode_return,
+                                   num_steps=jnp.asarray(self._num_steps))
+
+    def _step(self, external_action):
+        raise NotImplementedError('_step() not implemented.')
