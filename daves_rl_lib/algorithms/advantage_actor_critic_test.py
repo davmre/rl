@@ -22,15 +22,6 @@ from daves_rl_lib.internal import util
 
 class ActorCriticTests(test_util.TestCase):
 
-    def test_episode_reward_to_go(self):
-        rewards = [3., 7., -2., 1., 5.]
-        done = [True, False, False, True, False]
-        rtg = advantage_actor_critic.episode_reward_to_go(jnp.array(rewards),
-                                                          jnp.array(done),
-                                                          discount_factor=0.5)
-        expected = jnp.array([3., 7 - 0.5 * 2. + 0.25, -2. + 0.5, 1., 5.])
-        self.assertTrue(jnp.all(jnp.equal(rtg, expected)))
-
     def test_batch_policy_gradient(self):
         policy_seed, obs_seed, action_seed, advantage_seed = jax.random.split(
             jax.random.PRNGKey(0), num=4)
@@ -163,14 +154,14 @@ class ActorCriticTests(test_util.TestCase):
                     done=next_states.done))
             states = next_states
 
-        initial_state_value = agent.value_net.apply(weights.value_weights,
-                                                    initial_state_observation)
+        initial_state_value = agent.value_net.apply(
+            weights.agent_weights.value_weights, initial_state_observation)
         np.testing.assert_allclose(initial_state_value, 1., atol=0.02)
 
     def test_learns_in_trivial_discrete_environment(self):
         batch_size = 128
         num_steps_inner = 8
-        num_steps_outer = 101
+        num_steps_outer = 20
         discount_factor = 0.9
         seed = test_util.test_seed()
 
@@ -187,7 +178,7 @@ class ActorCriticTests(test_util.TestCase):
             value_net=networks.make_model([32, 32, 1],
                                           obs_size=env.observation_size),
             policy_optimizer=optax.adam(1e-1),
-            value_optimizer=optax.adam(1e-2),
+            value_optimizer=optax.adam(1e-2, b1=0.5),
             discount_factor=discount_factor,
             entropy_regularization=0.0,
             steps_per_update=num_steps_inner)
@@ -206,8 +197,8 @@ class ActorCriticTests(test_util.TestCase):
         for _ in range(num_steps_outer * num_steps_inner):
             states, weights, seed = step_fn(states, weights, seed)
         # Value estimate for initial state.
-        self.assertAllClose(agent.value_net.apply(weights.value_weights,
-                                                  initial_state_obs),
+        self.assertAllClose(agent.value_net.apply(
+            weights.agent_weights.value_weights, initial_state_obs),
                             discount_factor,
                             atol=0.02)
 

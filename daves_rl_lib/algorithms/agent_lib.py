@@ -1,3 +1,5 @@
+import dataclasses
+from os import environ
 from typing import Any, Optional
 
 import jax
@@ -58,10 +60,6 @@ class EpisodicAgent(Agent):
     def init_weights(self, seed: type_util.KeyArray,
                      dummy_observation: jnp.ndarray, dummy_action: jnp.ndarray,
                      **kwargs) -> EpisodicMemoryWeights:
-        """
-        If the agent will be run in a batch environment, the dummy observation and
-        action should have the corresponding batch shape.
-        """
         return EpisodicMemoryWeights(
             episode_buffer=replay_buffer.ReplayBuffer.initialize_empty(
                 size=self._max_num_steps,
@@ -104,8 +102,109 @@ class EpisodicAgent(Agent):
         raise NotImplementedError()
 
 
-def zero_invalid(x, num_valid):
+def zero_out_suffix_of_elements(x, num_valid):
     num_total = x.shape[0]
     valid_mask = jnp.arange(num_total) < num_valid
     return jnp.where(jnp.reshape(valid_mask, (-1,) + (1,) * (len(x.shape) - 1)),
                      x, jnp.zeros_like(x))
+
+
+@struct.dataclass
+class PeriodicUpdateAgentWeights:
+    steps_buffer: replay_buffer.ReplayBuffer
+    num_updates: jnp.ndarray
+    agent_weights: Any
+
+
+class PeriodicUpdateAgent(Agent):
+    """Agent that updates its weights every `steps_per_update` steps."""
+
+    def __init__(self, steps_per_update: int):
+        self._steps_per_update = steps_per_update
+        super().__init__()
+
+    def init_weights(self,
+                     seed: type_util.KeyArray,
+                     dummy_observation: jnp.ndarray,
+                     dummy_action: jnp.ndarray,
+                     batch_size: Optional[int] = None,
+                     **kwargs) -> PeriodicUpdateAgentWeights:
+        init_steps_buffer = (lambda _: replay_buffer.ReplayBuffer.
+                             initialize_empty(size=self._steps_per_update,
+                                              observation=dummy_observation,
+                                              action=dummy_action))
+        return PeriodicUpdateAgentWeights(
+            steps_buffer=(jax.vmap(init_steps_buffer)(jnp.arange(batch_size))
+                          if batch_size else init_steps_buffer(None)),
+            num_updates=jnp.zeros([], dtype=jnp.int32),
+            agent_weights=self._init_weights(seed, **kwargs))
+
+    def action_dist(self, weights: PeriodicUpdateAgentWeights,
+                    observation: jnp.ndarray) -> tfp.distributions.Distribution:
+        return self._action_dist(weights.agent_weights, observation)
+
+    def update(
+            self, weights: PeriodicUpdateAgentWeights,
+            transition: environment_lib.Transition
+    ) -> PeriodicUpdateAgentWeights:
+        reset_buffer_fn = lambda b: b.reset()
+        if transition.done.shape:  # parallel batch of transitions
+            steps_buffer = jax.vmap(lambda b, t: b.with_transition(t))(
+                weights.steps_buffer, transition)
+            reset_buffer_fn = jax.vmap(reset_buffer_fn)
+        else:
+            steps_buffer = weights.steps_buffer.with_transition(transition)
+
+        return jax.lax.cond(
+            # Formally check if any worker's buffer is full, though since all
+            # buffers are the same size they must fill (and be reset)
+            # at the same time.
+            jnp.any(weights.steps_buffer.is_full),
+            # Update the agent's weights and reset the buffer.
+            lambda: dataclasses.replace(
+                weights,
+                agent_weights=self._update(weights.agent_weights, weights.
+                                           steps_buffer.transitions),
+                steps_buffer=reset_buffer_fn(steps_buffer),
+                num_updates=weights.num_updates + 1),
+            lambda: dataclasses.replace(weights, steps_buffer=steps_buffer))
+
+    def _update(self, weights: Any,
+                transitions: environment_lib.Transition) -> Any:
+        raise NotImplementedError()
+
+
+def episode_reward_to_go(rewards: jnp.ndarray,
+                         done: jnp.ndarray,
+                         discount_factor: float,
+                         final_state_value=None):
+    if final_state_value is not None:
+        # Treat the (discounted) value estimate for the final state as a reward
+        # propagated to previous steps in the same episode.
+        rewards = jnp.concatenate([rewards,
+                                   jnp.array([final_state_value])
+                                  ])  # type: ignore
+        done = jnp.concatenate([done, jnp.array([False])])  # type: ignore
+
+    size = rewards.shape[0]
+    indices = jnp.arange(size)
+    num_future_dones = jnp.cumsum(done[::-1])[::-1]
+
+    relevance_square = jnp.logical_and(
+        indices >= indices[..., None],
+        num_future_dones == num_future_dones[..., None])
+
+    episode_discount_square = jnp.cumprod(jnp.where(
+        indices > indices[..., None], discount_factor, 1.),
+                                          axis=-1) * relevance_square
+    # Equivalent to alternative:
+    # episode_discount_square = discount_factor**(
+    #    indices - indices[..., None]) * relevance_square
+    # but appears to be slightly faster for size=1000.
+    reward_to_go = jnp.sum(episode_discount_square * rewards[None, ...],
+                           axis=-1)
+
+    if final_state_value is not None:
+        # Remove the final state value.
+        reward_to_go = reward_to_go[:-1]
+    return reward_to_go

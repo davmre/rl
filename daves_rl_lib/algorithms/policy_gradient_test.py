@@ -1,9 +1,3 @@
-import dataclasses
-from statistics import mean
-from typing import Optional
-
-import gym
-
 import jax
 from jax import numpy as jnp
 import numpy as np
@@ -13,15 +7,12 @@ from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib import drivers
 from daves_rl_lib import networks
-from daves_rl_lib.algorithms import exploration_lib
 from daves_rl_lib.algorithms import policy_gradient
-from daves_rl_lib.algorithms import replay_buffer
-from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.environments import trivial_environment
 from daves_rl_lib.internal import test_util
 
 
-class PolicyGradientTests(test_util.TestCase):
+class EpisodicPolicyGradientTests(test_util.TestCase):
 
     def test_learns_in_trivial_discrete_environment(self):
 
@@ -37,7 +28,7 @@ class PolicyGradientTests(test_util.TestCase):
 
         seed = test_util.test_seed()
 
-        agent = policy_gradient.PolicyGradientAgent(
+        agent = policy_gradient.EpisodicPolicyGradientAgent(
             policy_net=networks.make_model(
                 [32, env.action_space.num_actions],  # type: ignore
                 obs_size=env.observation_size,

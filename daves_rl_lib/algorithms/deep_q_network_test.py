@@ -14,9 +14,8 @@ from tensorflow_probability.substrates import jax as tfp
 from daves_rl_lib import drivers
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import deep_q_network
-from daves_rl_lib.algorithms import exploration_lib
-from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
+from daves_rl_lib.environments import gym_environment
 from daves_rl_lib.environments import trivial_environment
 from daves_rl_lib.internal import test_util
 
@@ -189,7 +188,7 @@ class DQNTests(test_util.TestCase):
         buffer_size = 64
         epsilon = 0.1
         discount_factor = 0.6
-        env = environment_lib.GymEnvironment(gym.make("CartPole-v1"),
+        env = gym_environment.GymEnvironment(gym.make("CartPole-v1"),
                                              discount_factor=discount_factor)
         state = env.reset(seed=test_util.test_seed())
         initial_state_obs = state.observation
