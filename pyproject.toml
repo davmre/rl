@@ -6,3 +6,6 @@ sections=["FUTURE","STDLIB","THIRDPARTY","JAX","JAX_ECOSYSTEM","FIRSTPARTY","LOC
 
 [tool.yapf]
 style = "google"
+
+[tool.pyright]
+ignore = ["notebooks", "**ipynb"]
