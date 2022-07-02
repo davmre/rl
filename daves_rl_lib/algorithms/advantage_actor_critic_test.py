@@ -103,13 +103,15 @@ class ActorCriticTests(test_util.TestCase):
             self.assertSameShapeNested(new_weights, weights)
             weights = new_weights
 
-    def test_estimates_value(self):
+    @parameterized.named_parameters([('_no_batch', None), ('_batch', 8)])
+    def test_estimates_value(self, batch_size):
         discount_factor = 0.5
-        batch_size = 8
         env = trivial_environment.OneStepEnvironment(
             discount_factor=discount_factor)
         states = env.reset(seed=test_util.test_seed(), batch_size=batch_size)
-        initial_state_observation = states.observation[0, ...]
+        initial_state_observation = states.observation
+        if batch_size:
+            initial_state_observation = initial_state_observation[0, ...]
 
         agent = advantage_actor_critic.A2CAgent(
             policy_net=networks.make_model(
@@ -124,7 +126,7 @@ class ActorCriticTests(test_util.TestCase):
             discount_factor=discount_factor)
         weights = agent.init_weights(
             seed=test_util.test_seed(),
-            dummy_observation=states.observation[0, ...],
+            dummy_observation=initial_state_observation,
             dummy_action=env.action_space.dummy_action(),
             batch_size=batch_size)
 
@@ -138,12 +140,18 @@ class ActorCriticTests(test_util.TestCase):
             next_state = env.step(state, action)
             return state, action, next_state
 
+        do_step_fn = do_step
+        if batch_size:
+            do_step_fn = (
+                lambda st, w, sd: jax.vmap(
+                    do_step,
+                    in_axes=(0, None, 0)  # type: ignore
+                )(st, w, jax.random.split(sd, batch_size)))
+
         seed = test_util.test_seed()
         for i in range(200):
             seed, action_seed = jax.random.split(seed, 2)
-            states, actions, next_states = jax.vmap(
-                do_step, in_axes=(0, None, 0))(  # type: ignore
-                    states, weights, jax.random.split(action_seed, batch_size))
+            states, actions, next_states = do_step_fn(states, weights, seed)
             weights = jitted_step_fn(
                 weights,
                 environment_lib.Transition(
