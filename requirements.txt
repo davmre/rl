@@ -1,9 +1,10 @@
 numpy
 jax>=0.3.3
-gym>=0.23.1
+gym[box2d]>=0.23.1
 pygame>=2.1.2
 open_spiel>=1.1.0
 absl-py>=1.0.0
 flax>=0.4.1
 optax>=0.1.1
 dm_control>=1.0
+wheel>=0.37.1

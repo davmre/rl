@@ -55,7 +55,9 @@ class ActorCriticTests(test_util.TestCase):
 
         self.assertAllCloseNested(policy_grad, expected_policy_grad, atol=1e-5)
 
-    def test_step_preserves_shapes(self):
+    @parameterized.named_parameters([('_no_auxiliary', False),
+                                     ('_auxiliary', True)])
+    def test_step_preserves_shapes(self, keep_auxiliary):
         batch_size = 32
         steps_per_update = 2
         observation_size = 2
@@ -71,6 +73,7 @@ class ActorCriticTests(test_util.TestCase):
             value_optimizer=optax.adam(1e-1),
             steps_per_update=steps_per_update,
             entropy_regularization=0.,
+            keep_auxiliary=keep_auxiliary,
             discount_factor=1.)
 
         weights = agent.init_weights(seed=test_util.test_seed(),

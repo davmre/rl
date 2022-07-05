@@ -25,9 +25,11 @@ class Agent(object):
                                   dummy_action=dummy_action,
                                   **kwargs)
 
-    def _init_weights(self, seed: type_util.KeyArray,
+    def _init_weights(self,
+                      seed: type_util.KeyArray,
                       dummy_observation: Optional[jnp.ndarray],
-                      dummy_action: Optional[jnp.ndarray]):
+                      dummy_action: Optional[jnp.ndarray],
+                      batch_size: Optional[int] = None) -> Any:
         raise NotImplementedError()
 
     def action_dist(self, weights,
@@ -137,7 +139,9 @@ class PeriodicUpdateAgent(Agent):
             steps_buffer=(jax.vmap(init_steps_buffer)(jnp.arange(batch_size))
                           if batch_size else init_steps_buffer(None)),
             num_updates=jnp.zeros([], dtype=jnp.int32),
-            agent_weights=self._init_weights(seed, **kwargs))
+            agent_weights=self._init_weights(seed,
+                                             batch_size=batch_size,
+                                             **kwargs))
 
     def action_dist(self, weights: PeriodicUpdateAgentWeights,
                     observation: jnp.ndarray) -> tfp.distributions.Distribution:
@@ -208,3 +212,13 @@ def episode_reward_to_go(rewards: jnp.ndarray,
         # Remove the final state value.
         reward_to_go = reward_to_go[:-1]
     return reward_to_go
+
+
+def update_moving_average(moving_average, value, decay):
+    return jax.tree_util.tree_map(lambda x, y: decay * x + (1 - decay) * y,
+                                  moving_average, value)
+
+
+def tree_norm(grad):
+    sqnorms = [jnp.sum(g**2) for g in jax.tree_util.tree_leaves(grad)]
+    return jnp.sqrt(sum(sqnorms))
