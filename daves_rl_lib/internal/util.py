@@ -76,6 +76,8 @@ def map_with_debug_paths(fn, *xs):
                     path + (field_name,),
                     *tuple(getattr(x, field_name) for x in xs))
             return type(x1)(**mapped)
+        if x1 is None:
+            return None
         else:
             raise TypeError(
                 f"I don't know how to define paths for pytree type {type(x1)}")

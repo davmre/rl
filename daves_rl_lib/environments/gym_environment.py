@@ -62,4 +62,9 @@ def action_space_from_gym_space(gym_space) -> environment_lib.ActionSpace:
         if gym_space.start != 0:
             raise ValueError('Gym action space start must be 0.')
         return environment_lib.ActionSpace(num_actions=gym_space.n)
+    elif hasattr(gym_space, 'low'):  # Box space.
+        return environment_lib.ActionSpace(minimum=gym_space.low,
+                                           maximum=gym_space.high,
+                                           num_actions=None,
+                                           shape=gym_space.shape)
     raise NotImplementedError('Gym space type not supported:', type(gym_space))
