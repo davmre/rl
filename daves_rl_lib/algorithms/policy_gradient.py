@@ -3,6 +3,7 @@ from email import policy
 from typing import Any, Callable, Optional
 
 import jax
+from jax.experimental import host_callback
 import jax.numpy as jnp
 
 from flax import struct
@@ -25,20 +26,22 @@ class PolicyGradientAgentWeights:
 
 class EpisodicPolicyGradientAgent(agent_lib.EpisodicAgent):
 
-    def __init__(
-        self,
-        policy_net: networks.FeedForwardModel,
-        policy_optimizer: optax.GradientTransformation,
-        max_num_steps: int,
-        discount_factor: float = 1.,
-        reward_to_go: bool = True,
-        standardize_advantages: bool = True,
-    ):
+    def __init__(self,
+                 policy_net: networks.FeedForwardModel,
+                 policy_optimizer: optax.GradientTransformation,
+                 max_num_steps: int,
+                 discount_factor: float = 1.,
+                 reward_to_go: bool = True,
+                 standardize_advantages: bool = True,
+                 ppo_clip_epsilon=0.2,
+                 ppo_steps_per_iteration=1):
         self._policy_net = policy_net
         self._policy_optimizer = policy_optimizer
         self._discount_factor = discount_factor
         self._reward_to_go = reward_to_go
         self._standardize_advantages = standardize_advantages
+        self._ppo_clip_epsilon = ppo_clip_epsilon
+        self._ppo_steps_per_iteration = ppo_steps_per_iteration
         super().__init__(max_num_steps=max_num_steps)
 
     @property
@@ -65,40 +68,49 @@ class EpisodicPolicyGradientAgent(agent_lib.EpisodicAgent):
                                                   num_valid_transitions),
             done=jnp.zeros(transitions.reward.shape, dtype=bool),
             discount_factor=self._discount_factor)
+        surrogate_loss = ppo_surrogate_loss(
+            self.policy_net,
+            batch_obs=transitions.observation,
+            batch_actions=transitions.action,
+            batch_advantages=value_estimates,
+            num_valid_transitions=num_valid_transitions,
+            old_weights=(weights.policy_weights
+                         if self._ppo_steps_per_iteration > 1 else None),
+            ppo_clip_epsilon=self._ppo_clip_epsilon,
+            jit_compile=False)
 
-        def surrogate_loss(policy_weights):
-            action_dists = self.policy_net.apply(policy_weights,
-                                                 transitions.observation)
-            lps = agent_lib.zero_out_suffix_of_elements(
-                action_dists.log_prob(transitions.action),
-                num_valid_transitions)
-            return -jnp.sum(lps * value_estimates)
-
-        policy_gradient = jax.grad(surrogate_loss)(weights.policy_weights)
-        policy_updates, policy_optimizer_state = self._policy_optimizer.update(
-            policy_gradient, weights.policy_optimizer_state)
+        policy_weights = weights.policy_weights
+        policy_optimizer_state = weights.policy_optimizer_state
+        for ppo_step in range(self._ppo_steps_per_iteration):
+            policy_updates, policy_optimizer_state = (
+                self._policy_optimizer.update(
+                    jax.grad(surrogate_loss)(policy_weights),
+                    policy_optimizer_state))
+            policy_weights = optax.apply_updates(weights.policy_weights,
+                                                 policy_updates)
         return PolicyGradientAgentWeights(
-            policy_weights=optax.apply_updates(weights.policy_weights,
-                                               policy_updates),
+            policy_weights=policy_weights,
             policy_optimizer_state=policy_optimizer_state)
 
 
 class PolicyGradientAgent(agent_lib.PeriodicUpdateAgent):
 
-    def __init__(
-        self,
-        policy_net: networks.FeedForwardModel,
-        policy_optimizer: optax.GradientTransformation,
-        steps_per_update: int,
-        discount_factor: float = 1.,
-        reward_to_go: bool = True,
-        standardize_advantages: bool = True,
-    ):
+    def __init__(self,
+                 policy_net: networks.FeedForwardModel,
+                 policy_optimizer: optax.GradientTransformation,
+                 steps_per_update: int,
+                 discount_factor: float = 1.,
+                 reward_to_go: bool = True,
+                 standardize_advantages: bool = True,
+                 ppo_clip_epsilon=0.2,
+                 ppo_steps_per_iteration=1):
         self._policy_net = policy_net
         self._policy_optimizer = policy_optimizer
         self._discount_factor = discount_factor
         self._reward_to_go = reward_to_go
         self._standardize_advantages = standardize_advantages
+        self._ppo_clip_epsilon = ppo_clip_epsilon
+        self._ppo_steps_per_iteration = ppo_steps_per_iteration
         super().__init__(steps_per_update=steps_per_update)
 
     @property
@@ -146,28 +158,32 @@ class PolicyGradientAgent(agent_lib.PeriodicUpdateAgent):
             self, weights: PolicyGradientAgentWeights,
             transitions: environment_lib.Transition
     ) -> PolicyGradientAgentWeights:
-        advantage_estimates = self._estimate_advantages(weights=weights,
-                                                        transitions=transitions)
+        surrogate_loss = ppo_surrogate_loss(
+            self.policy_net,
+            batch_obs=transitions.observation,
+            batch_actions=transitions.action,
+            batch_advantages=self._estimate_advantages(weights=weights,
+                                                       transitions=transitions),
+            old_weights=(weights.policy_weights
+                         if self._ppo_steps_per_iteration > 1 else None),
+            ppo_clip_epsilon=self._ppo_clip_epsilon)
 
-        def surrogate_loss(policy_weights):
-            action_dists = self.policy_net.apply(policy_weights,
-                                                 transitions.observation)
-            lps = action_dists.log_prob(transitions.action)
-            return -jnp.sum(lps * advantage_estimates)
-
-        policy_gradient = jax.grad(surrogate_loss)(weights.policy_weights)
-        policy_updates, policy_optimizer_state = self._policy_optimizer.update(
-            policy_gradient, weights.policy_optimizer_state)
+        policy_weights = weights.policy_weights
+        policy_optimizer_state = weights.policy_optimizer_state
+        for _ in range(self._ppo_steps_per_iteration):
+            policy_updates, policy_optimizer_state = (
+                self._policy_optimizer.update(
+                    jax.grad(surrogate_loss)(policy_weights),
+                    policy_optimizer_state))
+            policy_weights = optax.apply_updates(weights.policy_weights,
+                                                 policy_updates)
         return PolicyGradientAgentWeights(
-            policy_weights=optax.apply_updates(weights.policy_weights,
-                                               policy_updates),
+            policy_weights=policy_weights,
             policy_optimizer_state=policy_optimizer_state)
 
 
 def episode_reward(rewards: jnp.ndarray, done: jnp.ndarray,
                    discount_factor: float):
-
-    size = rewards.shape[0]
     num_future_dones = jnp.cumsum(done[::-1])[::-1]
 
     relevance_square = num_future_dones == num_future_dones[..., None]
@@ -175,3 +191,55 @@ def episode_reward(rewards: jnp.ndarray, done: jnp.ndarray,
         relevance_square, discount_factor, 1.),
                                                      axis=-1) * relevance_square
     return jnp.sum(discounts * rewards[None, ...], axis=-1)
+
+
+def ppo_surrogate_loss(policy_net,
+                       batch_obs,
+                       batch_actions,
+                       batch_advantages,
+                       num_valid_transitions=None,
+                       old_weights=None,
+                       ppo_clip_epsilon=0.2,
+                       jit_compile=True):
+    """
+    Computes the surrogate objective whose autodiff derivative is the policy
+    gradient.
+    """
+
+    # Prevent gradients to the old weights, in case the user passes
+    # old_weights=weights.
+    old_weights = jax.tree_util.tree_map(jax.lax.stop_gradient, old_weights)
+
+    def fn_of_weights(w):
+
+        def scaled_lp(adv, action, obs):
+
+            action_lp = policy_net.apply(w, obs).log_prob(action)
+            if old_weights is None:
+                action_lp_old = jax.lax.stop_gradient(action_lp)
+            else:
+                action_lp_old = policy_net.apply(old_weights,
+                                                 obs).log_prob(action)
+
+            importance_weight = jnp.exp(action_lp - action_lp_old)
+            clipped_importance_weight = jnp.clip(importance_weight,
+                                                 1 - ppo_clip_epsilon,
+                                                 1 + ppo_clip_epsilon)
+
+            lps = jnp.minimum(adv * importance_weight,
+                              adv * clipped_importance_weight)
+            return lps
+
+        scaled_lps = jax.vmap(scaled_lp)(batch_advantages, batch_actions,
+                                         batch_obs)
+        if num_valid_transitions is not None:
+            scaled_lps = agent_lib.zero_out_suffix_of_elements(
+                scaled_lps, num_valid_transitions)
+            # Preserve information about the number of transitions in the
+            # magnitude of the returned gradients. (makes the mean equivalent
+            # to a sum over valid transitions).
+            scaled_lps *= num_valid_transitions
+        # Return the negative objective as a loss to be minimized.
+        return -jnp.mean(scaled_lps)
+
+    return jax.jit(fn_of_weights) if jit_compile else fn_of_weights

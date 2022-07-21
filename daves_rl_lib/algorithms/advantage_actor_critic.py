@@ -10,6 +10,7 @@ import optax
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import agent_lib
 from daves_rl_lib.algorithms import exploration_lib
+from daves_rl_lib.algorithms import policy_gradient
 from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import type_util
@@ -137,7 +138,7 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
         value_grad, advantages = jax.grad(value_net_loss,
                                           has_aux=True)(value_weights)
 
-        policy_loss_fn = policy_surrogate_objective(
+        policy_loss_fn = policy_gradient.ppo_surrogate_loss(
             self.policy_net,
             batch_obs=transitions.observation,
             batch_actions=transitions.action,
@@ -147,7 +148,7 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
             self.policy_net.apply(w, transitions.observation).entropy()))(
                 policy_weights)
         regularized_policy_grad = jax.tree_util.tree_map(
-            lambda a, b: a + self._entropy_regularization * b, policy_grad,
+            lambda a, b: a - self._entropy_regularization * b, policy_grad,
             entropy_grad)
         return value_grad, regularized_policy_grad, (
             advantages, policy_entropy, agent_lib.tree_norm(policy_grad),
@@ -179,10 +180,7 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
         value_weights = optax.apply_updates(weights.value_weights,
                                             value_updates)
         policy_updates, policy_optimizer_state = self._policy_optimizer.update(
-            # We want to *maximize* reward, rather than minimize loss, so
-            # pass negative gradients to the optimizer.
-            jax.tree_util.tree_map(lambda g: -g, policy_grad),
-            weights.policy_optimizer_state)
+            policy_grad, weights.policy_optimizer_state)
         policy_weights = optax.apply_updates(weights.policy_weights,
                                              policy_updates)
 
@@ -201,22 +199,3 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
                               entropy_grad_norm=entropy_grad_norm,
                               value_grad_norm=value_grad_norm)
                           if self._keep_auxiliary else weights.auxiliary)
-
-
-def policy_surrogate_objective(policy_net, batch_obs, batch_actions,
-                               batch_advantages):
-    """
-    Computes the surrogate objective whose autodiff derivative is the policy
-    gradient.
-    """
-
-    def fn_of_weights(w):
-
-        def scaled_lp(adv, action, obs):
-            return adv * policy_net.apply(w, obs).log_prob(action)
-
-        scaled_lps = jax.vmap(scaled_lp)(batch_advantages, batch_actions,
-                                         batch_obs)
-        return jnp.mean(scaled_lps)
-
-    return fn_of_weights

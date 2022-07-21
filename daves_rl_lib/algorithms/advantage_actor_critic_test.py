@@ -17,43 +17,9 @@ from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.environments import trivial_environment
 from daves_rl_lib.internal import test_util
-from daves_rl_lib.internal import util
 
 
 class ActorCriticTests(test_util.TestCase):
-
-    def test_batch_policy_gradient(self):
-        policy_seed, obs_seed, action_seed, advantage_seed = jax.random.split(
-            jax.random.PRNGKey(0), num=4)
-        num_steps = 17
-        policy_net = networks.make_model(
-            layer_sizes=[4],
-            obs_size=2,
-            activate_final=tfp.distributions.Categorical)
-        policy_weights = policy_net.init(policy_seed)
-
-        observations = jax.random.normal(obs_seed, shape=(num_steps, 2))
-        action_dist = policy_net.apply(policy_weights, observations)
-        actions = action_dist.sample(seed=action_seed)
-        advantages = jax.random.normal(advantage_seed, shape=(num_steps,))
-
-        policy_loss_fn = advantage_actor_critic.policy_surrogate_objective(
-            policy_net,
-            batch_obs=observations,
-            batch_actions=actions,
-            batch_advantages=advantages)
-        policy_grad = jax.grad(policy_loss_fn)(policy_weights)
-
-        # Compare to explicit calculation
-        def score(obs, a):
-            return jax.grad(lambda w: policy_net.apply(w, obs).log_prob(a))(
-                policy_weights)
-
-        expected_policy_grad = jax.tree_util.tree_map(
-            lambda s: jnp.mean(util.batch_multiply(advantages, s), axis=0),
-            jax.vmap(score)(observations, actions))
-
-        self.assertAllCloseNested(policy_grad, expected_policy_grad, atol=1e-5)
 
     @parameterized.named_parameters([('_no_auxiliary', False),
                                      ('_auxiliary', True)])
