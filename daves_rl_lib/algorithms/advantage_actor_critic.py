@@ -137,11 +137,12 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
         value_grad, advantages = jax.grad(value_net_loss,
                                           has_aux=True)(value_weights)
 
-        policy_grad = batch_policy_gradient(self.policy_net,
-                                            policy_weights,
-                                            batch_obs=transitions.observation,
-                                            batch_actions=transitions.action,
-                                            batch_advantages=advantages)
+        policy_loss_fn = policy_surrogate_objective(
+            self.policy_net,
+            batch_obs=transitions.observation,
+            batch_actions=transitions.action,
+            batch_advantages=advantages)
+        policy_grad = jax.grad(policy_loss_fn)(policy_weights)
         policy_entropy, entropy_grad = jax.value_and_grad(lambda w: jnp.mean(
             self.policy_net.apply(w, transitions.observation).entropy()))(
                 policy_weights)
@@ -202,12 +203,11 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
                           if self._keep_auxiliary else weights.auxiliary)
 
 
-def batch_policy_gradient(policy_net, policy_weights, batch_obs, batch_actions,
-                          batch_advantages):
+def policy_surrogate_objective(policy_net, batch_obs, batch_actions,
+                               batch_advantages):
     """
-    Computes `mean(advantages * scores, axis=0)` where
-    `scores[i] = grad(policy_lp[i], policy_weights)`
-    is the batch of score function vectors.
+    Computes the surrogate objective whose autodiff derivative is the policy
+    gradient.
     """
 
     def fn_of_weights(w):
@@ -219,4 +219,4 @@ def batch_policy_gradient(policy_net, policy_weights, batch_obs, batch_actions,
                                          batch_obs)
         return jnp.mean(scaled_lps)
 
-    return jax.grad(fn_of_weights)(policy_weights)
+    return fn_of_weights

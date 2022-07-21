@@ -37,12 +37,12 @@ class ActorCriticTests(test_util.TestCase):
         actions = action_dist.sample(seed=action_seed)
         advantages = jax.random.normal(advantage_seed, shape=(num_steps,))
 
-        policy_grad = advantage_actor_critic.batch_policy_gradient(
+        policy_loss_fn = advantage_actor_critic.policy_surrogate_objective(
             policy_net,
-            policy_weights,
             batch_obs=observations,
             batch_actions=actions,
             batch_advantages=advantages)
+        policy_grad = jax.grad(policy_loss_fn)(policy_weights)
 
         # Compare to explicit calculation
         def score(obs, a):
@@ -172,7 +172,7 @@ class ActorCriticTests(test_util.TestCase):
     def test_learns_in_trivial_discrete_environment(self):
         batch_size = 128
         num_steps_inner = 8
-        num_steps_outer = 20
+        num_steps_outer = 80
         discount_factor = 0.9
         seed = test_util.test_seed()
 
@@ -186,10 +186,9 @@ class ActorCriticTests(test_util.TestCase):
                 [32, env._dim * 2],
                 obs_size=env.observation_size,
                 activate_final=networks.categorical_from_logits),
-            value_net=networks.make_model([32, 32, 1],
-                                          obs_size=env.observation_size),
-            policy_optimizer=optax.adam(1e-1),
-            value_optimizer=optax.adam(1e-2, b1=0.5),
+            value_net=networks.make_model([1], obs_size=env.observation_size),
+            policy_optimizer=optax.adam(1e-2),
+            value_optimizer=optax.adam(5e-2, b1=0.5),
             discount_factor=discount_factor,
             entropy_regularization=0.0,
             steps_per_update=num_steps_inner)
@@ -207,11 +206,14 @@ class ActorCriticTests(test_util.TestCase):
         seed = test_util.test_seed()
         for _ in range(num_steps_outer * num_steps_inner):
             states, weights, seed = step_fn(states, weights, seed)
+            print(
+                agent.value_net.apply(weights.agent_weights.value_weights,
+                                      initial_state_obs))
         # Value estimate for initial state.
         self.assertAllClose(agent.value_net.apply(
             weights.agent_weights.value_weights, initial_state_obs),
                             discount_factor,
-                            atol=0.02)
+                            atol=0.005)
 
         final_returns = np.array(states.episode_return)[states.done]
         final_lengths = np.array(states.num_steps)[states.done]
