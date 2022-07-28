@@ -1,4 +1,5 @@
 import collections
+from functools import partial
 from typing import Optional, Union
 
 import tree
@@ -55,6 +56,11 @@ def format(x, fmt=lambda x: np.array_str(np.asarray(x), precision=3)):
 
 def format_summary(x, **kwargs):
     return format(jax.tree_util.tree_map(summarize, x), **kwargs)
+
+
+@partial(jnp.vectorize, signature='(k),(d)->(d)')
+def batch_gather(x, indices):
+    return jnp.take(x, indices)
 
 
 def map_with_debug_paths(fn, *xs):

@@ -4,6 +4,7 @@ from typing import Any, Callable, Optional, Union
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 
 from flax import struct
 import optax
@@ -37,7 +38,8 @@ class DQNAgent(agent_lib.Agent):
                  target_weights_decay: float,
                  gradient_batch_size: int,
                  discount_factor: float = 1.,
-                 entropy_regularization: Optional[float] = None):
+                 entropy_regularization: Optional[float] = None,
+                 use_double_estimator: bool = True):
         self._qvalue_net = qvalue_net
         self._qvalue_optimizer = qvalue_optimizer
         self._replay_buffer_size = replay_buffer_size
@@ -47,6 +49,7 @@ class DQNAgent(agent_lib.Agent):
         self._gradient_batch_size = gradient_batch_size
         self._discount_factor = discount_factor
         self._entropy_regularization = entropy_regularization
+        self._use_double_estimator = use_double_estimator
         super().__init__()
 
     @property
@@ -106,7 +109,8 @@ class DQNAgent(agent_lib.Agent):
             qvalue_net=self.qvalue_net,
             qvalue_target_weights=weights.qvalue_target_weights,
             entropy_regularization=self._entropy_regularization,
-            discount_factor=self._discount_factor)
+            discount_factor=self._discount_factor,
+            use_double_estimator=self._use_double_estimator)
         # Compute TD error and update the network accordingly.
         qvalue_weights_grad, _ = jax.grad(td_error,
                                           has_aux=True)(weights.qvalue_weights)
@@ -130,10 +134,43 @@ class DQNAgent(agent_lib.Agent):
             num_steps=weights.num_steps + 1)
 
 
+def optimal_state_value(observation: jnp.ndarray,
+                        qvalue_net: networks.FeedForwardModel,
+                        qvalue_target_weights: type_util.PyTree,
+                        qvalue_selection_weights: Optional[type_util.PyTree]):
+    qvalues = qvalue_net.apply(qvalue_target_weights, observation)
+    if qvalue_selection_weights is not None:
+        selection_qvalues = qvalue_net.apply(qvalue_selection_weights,
+                                             observation)
+        selected_action = jnp.argmax(selection_qvalues, axis=-1, keepdims=True)
+        return util.batch_gather(qvalues, selected_action)[..., 0]
+    return jnp.max(qvalues, axis=-1)
+
+
+def optimal_regularized_state_value(
+        observation: jnp.ndarray, qvalue_net: networks.FeedForwardModel,
+        qvalue_target_weights: type_util.PyTree,
+        qvalue_selection_weights: Optional[type_util.PyTree],
+        entropy_regularization: float):
+    qvalues = qvalue_net.apply(qvalue_target_weights, observation)
+    if qvalue_selection_weights is not None:
+        selection_qvalues = qvalue_net.apply(qvalue_selection_weights,
+                                             observation)
+        naive_softmax_value = entropy_regularization * jsp.special.logsumexp(
+            selection_qvalues / entropy_regularization, axis=-1)
+        selection_probs = jax.nn.softmax(selection_qvalues, axis=-1)
+        correction = jnp.sum(selection_probs * (qvalues - selection_qvalues),
+                             axis=-1)
+        return naive_softmax_value - correction
+    return entropy_regularization * jsp.special.logsumexp(
+        qvalues / entropy_regularization, axis=-1)
+
+
 def qvalues_and_td_error(transition: environment_lib.Transition,
                          qvalue_net: networks.FeedForwardModel,
                          qvalue_weights: type_util.PyTree,
                          qvalue_target_weights: type_util.PyTree,
+                         use_double_estimator: bool = True,
                          discount_factor=1.,
                          entropy_regularization: Optional[float] = None):
     """
@@ -146,15 +183,24 @@ def qvalues_and_td_error(transition: environment_lib.Transition,
         states.
       td_error: (batch of) scalar temporal difference error(s).
     """
-    next_qvalues = qvalue_net.apply(qvalue_target_weights,
-                                    transition.next_observation)
-    if entropy_regularization:
-        next_state_values = entropy_regularization * jnp.logaddexp(
-            next_qvalues / entropy_regularization, axis=-1)
+
+    qvalue_selection_weights = (jax.lax.stop_gradient(qvalue_weights)
+                                if use_double_estimator else None)
+    if entropy_regularization is None:
+        next_state_values = optimal_state_value(
+            observation=transition.next_observation,
+            qvalue_net=qvalue_net,
+            qvalue_target_weights=qvalue_target_weights,
+            qvalue_selection_weights=qvalue_selection_weights)
     else:
-        next_state_values = jnp.max(next_qvalues, axis=-1)
-    next_state_values = jnp.where(transition.done, 0, next_state_values)
-    target_values = transition.reward + discount_factor * next_state_values
+        next_state_values = optimal_regularized_state_value(
+            observation=transition.next_observation,
+            qvalue_net=qvalue_net,
+            qvalue_target_weights=qvalue_target_weights,
+            qvalue_selection_weights=qvalue_selection_weights,
+            entropy_regularization=entropy_regularization)
+    target_values = transition.reward + jnp.where(
+        transition.done, 0, discount_factor * next_state_values)
     qvalues = jnp.take_along_axis(qvalue_net.apply(qvalue_weights,
                                                    transition.observation),
                                   transition.action[..., None],
@@ -166,6 +212,7 @@ def temporal_difference_loss_fn(transitions: environment_lib.Transition,
                                 qvalue_net: networks.FeedForwardModel,
                                 qvalue_target_weights,
                                 discount_factor: float = 1.,
+                                use_double_estimator: bool = True,
                                 entropy_regularization: Optional[float] = None):
     """Temporal difference objective as a function of the Q value weights."""
 
@@ -176,6 +223,7 @@ def temporal_difference_loss_fn(transitions: environment_lib.Transition,
             qvalue_weights=weights,
             qvalue_target_weights=qvalue_target_weights,
             entropy_regularization=entropy_regularization,
+            use_double_estimator=use_double_estimator,
             discount_factor=discount_factor)
         return 0.5 * jnp.mean(td_errors**2, axis=-1), (qvalues, target_values)
 

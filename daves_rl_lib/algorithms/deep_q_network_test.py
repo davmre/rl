@@ -110,7 +110,13 @@ class DQNTests(test_util.TestCase):
                             jnp.array([initial_state_obs] * buffer_size))
         self.assertAllEqual(weights.replay_buffer.transitions.done, True)
 
-    def test_update_qvalue_network(self):
+    @parameterized.named_parameters([
+        ('', False, None),
+        ('_double', True, None),
+        ('_soft', False, 0.1),
+        ('_double_soft', True, 0.1),
+    ])
+    def test_update_qvalue_network(self, double_q, entropy_regularization):
         discount_factor = 0.8
         env = trivial_environment.OneStepEnvironment(
             discount_factor=discount_factor)
@@ -126,7 +132,9 @@ class DQNTests(test_util.TestCase):
             gradient_batch_size=4,
             epsilon=0.,
             target_weights_decay=0.5,
-            discount_factor=discount_factor)
+            discount_factor=discount_factor,
+            entropy_regularization=entropy_regularization,
+            use_double_estimator=double_q)
 
         weights = agent.init_weights(
             seed=test_util.test_seed(),
@@ -169,7 +177,6 @@ class DQNTests(test_util.TestCase):
             weights, td_error = updated_weights, updated_td_error
             updated_weights = agent.update(weights, transitions)
             updated_td_error = mean_abs_td_error(updated_weights)
-
         self.assertAllClose(updated_td_error, 0.25, atol=1e-5)
 
     def test_learns_in_trivial_discrete_environment(self):
