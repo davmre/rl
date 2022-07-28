@@ -7,14 +7,10 @@ import jax.numpy as jnp
 from flax import struct
 import optax
 
-from daves_rl_lib import networks
 from daves_rl_lib.algorithms import agent_lib
-from daves_rl_lib.algorithms import exploration_lib
 from daves_rl_lib.algorithms import policy_gradient
-from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import type_util
-from daves_rl_lib.internal import util
 
 
 @struct.dataclass

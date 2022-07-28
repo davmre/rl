@@ -2,6 +2,7 @@ import dataclasses
 from statistics import mean
 from typing import Optional
 
+from absl.testing import parameterized
 import gym
 
 import jax
@@ -21,6 +22,41 @@ from daves_rl_lib.internal import test_util
 
 
 class DQNTests(test_util.TestCase):
+
+    @parameterized.named_parameters([('_no_batch', np.asarray([1., 2.]), 4),
+                                     ('_batch',
+                                      np.asarray([[1., 2.], [3., 4.],
+                                                  [5., 6.]]), 4),
+                                     ('_one_action', np.array([1., 2.]), 1)])
+    def test_epsilon_greedy(self, obs, num_actions):
+        epsilon = 1e-1
+        batch_shape = obs.shape[:-1]
+        net = networks.make_model([num_actions], obs_size=obs.shape[-1])
+        agent = deep_q_network.DQNAgent(qvalue_net=net,
+                                        qvalue_optimizer=optax.adam(0.1),
+                                        replay_buffer_size=0,
+                                        gradient_batch_size=8,
+                                        epsilon=epsilon,
+                                        target_weights_decay=0.9)
+
+        weights = agent.init_weights(test_util.test_seed())
+        qvalues = net.apply(weights.qvalue_weights, obs)
+        self.assertEqual(qvalues.shape, batch_shape + (num_actions,))
+        best_actions = jnp.argmax(qvalues, axis=-1)
+
+        action_dist = agent.action_dist(weights, obs)
+        self.assertEqual(action_dist.batch_shape, batch_shape)
+        self.assertEqual(action_dist.event_shape, ())
+        probs = action_dist[..., jnp.newaxis].prob(jnp.arange(num_actions))
+        probs_of_best_actions = jnp.take_along_axis(probs,
+                                                    best_actions[..., None],
+                                                    axis=-1)[..., 0]
+        if num_actions > 1:
+            self.assertAllClose(
+                probs_of_best_actions,
+                jnp.ones(batch_shape) * (1 - epsilon) + epsilon / num_actions)
+        else:
+            self.assertAllClose(probs_of_best_actions, 1.)
 
     def test_transitions_are_collected_in_buffer(self):
         env = trivial_environment.OneStepEnvironment(discount_factor=0.9)

@@ -11,7 +11,6 @@ from tensorflow_probability.substrates import jax as tfp
 
 from daves_rl_lib import networks
 from daves_rl_lib.algorithms import agent_lib
-from daves_rl_lib.algorithms import exploration_lib
 from daves_rl_lib.algorithms import replay_buffer
 from daves_rl_lib.environments import environment_lib
 from daves_rl_lib.internal import type_util
@@ -37,7 +36,8 @@ class DQNAgent(agent_lib.Agent):
                  epsilon: Union[float, optax.Schedule],
                  target_weights_decay: float,
                  gradient_batch_size: int,
-                 discount_factor: float = 1.):
+                 discount_factor: float = 1.,
+                 entropy_regularization: Optional[float] = None):
         self._qvalue_net = qvalue_net
         self._qvalue_optimizer = qvalue_optimizer
         self._replay_buffer_size = replay_buffer_size
@@ -46,6 +46,7 @@ class DQNAgent(agent_lib.Agent):
         self._target_weights_decay = target_weights_decay
         self._gradient_batch_size = gradient_batch_size
         self._discount_factor = discount_factor
+        self._entropy_regularization = entropy_regularization
         super().__init__()
 
     @property
@@ -71,11 +72,23 @@ class DQNAgent(agent_lib.Agent):
     def _action_dist(
             self, weights: DQNWeights,
             observation: jnp.ndarray) -> tfp.distributions.Distribution:
-        policy_fn = exploration_lib.epsilon_greedy_policy(
-            qvalue_net=self.qvalue_net,
-            qvalue_weights=weights.qvalue_weights,
-            epsilon=self._epsilon_fn(weights.num_steps))
-        return policy_fn(observation)
+        qvalues = self.qvalue_net.apply(weights.qvalue_weights, observation)
+        num_actions = qvalues.shape[-1]
+        if self._entropy_regularization is None:
+            greedy_dist = tfp.distributions.Categorical(probs=jax.nn.one_hot(
+                jnp.argmax(qvalues, axis=-1), num_classes=num_actions, axis=-1))
+        else:
+            greedy_dist = tfp.distributions.Categorical(
+                logits=qvalues / self._entropy_regularization)
+
+        # Epsilon-greedy exploration.
+        epsilon = self._epsilon_fn(weights.num_steps)
+        logits = greedy_dist.logits_parameter()
+        return tfp.distributions.MixtureSameFamily(
+            mixture_distribution=tfp.distributions.Categorical(
+                probs=[1. - epsilon, epsilon]),
+            components_distribution=tfp.distributions.Categorical(
+                logits=jnp.stack([logits, jnp.zeros_like(logits)], axis=-2)))
 
     def _update(self, weights: DQNWeights,
                 transition: environment_lib.Transition) -> DQNWeights:
@@ -86,14 +99,17 @@ class DQNAgent(agent_lib.Agent):
             replay_buffer = weights.replay_buffer.with_transition(transition)
 
         seed, replay_seed = jax.random.split(weights.seed)
-        # Compute TD error and update the network accordingly.
-        qvalue_weights_grad, _, _ = qvalue_weights_grad_from_transitions(
+
+        td_error = temporal_difference_loss_fn(
             transitions=replay_buffer.sample_uniform(
                 batch_shape=(self._gradient_batch_size,), seed=replay_seed),
             qvalue_net=self.qvalue_net,
-            qvalue_weights=weights.qvalue_weights,
             qvalue_target_weights=weights.qvalue_target_weights,
+            entropy_regularization=self._entropy_regularization,
             discount_factor=self._discount_factor)
+        # Compute TD error and update the network accordingly.
+        qvalue_weights_grad, _ = jax.grad(td_error,
+                                          has_aux=True)(weights.qvalue_weights)
 
         (qvalue_weights_update,
          qvalue_optimizer_state) = self._qvalue_optimizer.update(
@@ -118,7 +134,8 @@ def qvalues_and_td_error(transition: environment_lib.Transition,
                          qvalue_net: networks.FeedForwardModel,
                          qvalue_weights: type_util.PyTree,
                          qvalue_target_weights: type_util.PyTree,
-                         discount_factor=1.):
+                         discount_factor=1.,
+                         entropy_regularization: Optional[float] = None):
     """
 
     Args:
@@ -129,11 +146,14 @@ def qvalues_and_td_error(transition: environment_lib.Transition,
         states.
       td_error: (batch of) scalar temporal difference error(s).
     """
-    next_state_values = jnp.where(
-        transition.done, 0,
-        jnp.max(qvalue_net.apply(qvalue_target_weights,
-                                 transition.next_observation),
-                axis=-1))
+    next_qvalues = qvalue_net.apply(qvalue_target_weights,
+                                    transition.next_observation)
+    if entropy_regularization:
+        next_state_values = entropy_regularization * jnp.logaddexp(
+            next_qvalues / entropy_regularization, axis=-1)
+    else:
+        next_state_values = jnp.max(next_qvalues, axis=-1)
+    next_state_values = jnp.where(transition.done, 0, next_state_values)
     target_values = transition.reward + discount_factor * next_state_values
     qvalues = jnp.take_along_axis(qvalue_net.apply(qvalue_weights,
                                                    transition.observation),
@@ -142,11 +162,12 @@ def qvalues_and_td_error(transition: environment_lib.Transition,
     return qvalues, target_values, qvalues - target_values
 
 
-def qvalue_weights_grad_from_transitions(
-        transitions: environment_lib.Transition,
-        qvalue_net: networks.FeedForwardModel, qvalue_weights,
-        qvalue_target_weights, discount_factor):
-    """Computes the gradient of the loss function w.r.t. the weights."""
+def temporal_difference_loss_fn(transitions: environment_lib.Transition,
+                                qvalue_net: networks.FeedForwardModel,
+                                qvalue_target_weights,
+                                discount_factor: float = 1.,
+                                entropy_regularization: Optional[float] = None):
+    """Temporal difference objective as a function of the Q value weights."""
 
     def mean_squared_td_error(weights):
         qvalues, target_values, td_errors = qvalues_and_td_error(
@@ -154,9 +175,8 @@ def qvalue_weights_grad_from_transitions(
             qvalue_net=qvalue_net,
             qvalue_weights=weights,
             qvalue_target_weights=qvalue_target_weights,
+            entropy_regularization=entropy_regularization,
             discount_factor=discount_factor)
         return 0.5 * jnp.mean(td_errors**2, axis=-1), (qvalues, target_values)
 
-    grad, (qvalues, target_values) = jax.grad(mean_squared_td_error,
-                                              has_aux=True)(qvalue_weights)
-    return grad, qvalues, target_values
+    return mean_squared_td_error
