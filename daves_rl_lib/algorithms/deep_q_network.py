@@ -20,15 +20,13 @@ from daves_rl_lib.internal import util
 
 @struct.dataclass
 class DQNWeights:
-    replay_buffer: replay_buffer.ReplayBuffer
     qvalue_weights: Any
     qvalue_target_weights: Any
     qvalue_optimizer_state: Any
     num_steps: jnp.ndarray
-    seed: type_util.KeyArray
 
 
-class DQNAgent(agent_lib.Agent):
+class DQNAgent(agent_lib.ReplayBufferAgent):
 
     def __init__(self,
                  qvalue_net: networks.FeedForwardModel,
@@ -42,35 +40,26 @@ class DQNAgent(agent_lib.Agent):
                  use_double_estimator: bool = True):
         self._qvalue_net = qvalue_net
         self._qvalue_optimizer = qvalue_optimizer
-        self._replay_buffer_size = replay_buffer_size
         self._epsilon_fn = epsilon if callable(
             epsilon) else optax.constant_schedule(epsilon)
         self._target_weights_decay = target_weights_decay
-        self._gradient_batch_size = gradient_batch_size
         self._discount_factor = discount_factor
         self._entropy_regularization = entropy_regularization
         self._use_double_estimator = use_double_estimator
-        super().__init__()
+        super().__init__(replay_buffer_size=replay_buffer_size,
+                         gradient_batch_size=gradient_batch_size)
 
     @property
     def qvalue_net(self):
         return self._qvalue_net
 
-    def _init_weights(self, seed: type_util.KeyArray,
-                      dummy_observation: jnp.ndarray,
-                      dummy_action: jnp.ndarray):
-        seed, weights_seed = jax.random.split(seed, 2)
-        qvalue_weights = self.qvalue_net.init(weights_seed)
+    def _init_weights(self, seed: type_util.KeyArray) -> DQNWeights:
+        qvalue_weights = self.qvalue_net.init(seed)
         return DQNWeights(
-            replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
-                size=self._replay_buffer_size,
-                observation=dummy_observation,
-                action=dummy_action),
             qvalue_weights=qvalue_weights,
             qvalue_target_weights=qvalue_weights,
             qvalue_optimizer_state=self._qvalue_optimizer.init(qvalue_weights),
-            num_steps=jnp.zeros([], dtype=jnp.int32),
-            seed=seed)
+            num_steps=jnp.zeros([], dtype=jnp.int32))
 
     def _action_dist(
             self, weights: DQNWeights,
@@ -94,18 +83,11 @@ class DQNAgent(agent_lib.Agent):
                 logits=jnp.stack([logits, jnp.zeros_like(logits)], axis=-2)))
 
     def _update(self, weights: DQNWeights,
-                transition: environment_lib.Transition) -> DQNWeights:
-        batch_shape = transition.done.shape
-        if batch_shape:
-            replay_buffer = weights.replay_buffer.with_transitions(transition)
-        else:
-            replay_buffer = weights.replay_buffer.with_transition(transition)
-
-        seed, replay_seed = jax.random.split(weights.seed)
+                transitions: environment_lib.Transition,
+                seed: type_util.KeyArray) -> DQNWeights:
 
         td_error = temporal_difference_loss_fn(
-            transitions=replay_buffer.sample_uniform(
-                batch_shape=(self._gradient_batch_size,), seed=replay_seed),
+            transitions=transitions,
             qvalue_net=self.qvalue_net,
             qvalue_target_weights=weights.qvalue_target_weights,
             entropy_regularization=self._entropy_regularization,
@@ -122,7 +104,6 @@ class DQNAgent(agent_lib.Agent):
                                              qvalue_weights_update)
 
         return DQNWeights(
-            replay_buffer=replay_buffer,
             qvalue_weights=qvalue_weights,
             qvalue_optimizer_state=qvalue_optimizer_state,
             # Update the target network as a moving average.
@@ -130,7 +111,6 @@ class DQNAgent(agent_lib.Agent):
                 lambda x, y: self._target_weights_decay * x +
                 (1 - self._target_weights_decay) * y,
                 weights.qvalue_target_weights, qvalue_weights),
-            seed=seed,
             num_steps=weights.num_steps + 1)
 
 

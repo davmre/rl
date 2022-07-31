@@ -178,6 +178,63 @@ class PeriodicUpdateAgent(Agent):
         raise NotImplementedError()
 
 
+@struct.dataclass
+class ReplayBufferAgentWeights:
+    replay_buffer: replay_buffer.ReplayBuffer
+    agent_weights: Any
+    seed: type_util.KeyArray
+
+
+class ReplayBufferAgent(Agent):
+    """Agent that updates its weights every `steps_per_update` steps."""
+
+    def __init__(self, replay_buffer_size: int, gradient_batch_size: int):
+        self._replay_buffer_size = replay_buffer_size
+        self._gradient_batch_size = gradient_batch_size
+        super().__init__()
+
+    def init_weights(self, seed: type_util.KeyArray,
+                     dummy_observation: jnp.ndarray, dummy_action: jnp.ndarray,
+                     **kwargs) -> ReplayBufferAgentWeights:
+        seed, weights_seed = jax.random.split(seed, 2)
+        return ReplayBufferAgentWeights(
+            replay_buffer=replay_buffer.ReplayBuffer.initialize_empty(
+                size=self._replay_buffer_size,
+                observation=dummy_observation,
+                action=dummy_action),
+            agent_weights=self._init_weights(weights_seed, **kwargs),
+            seed=seed)
+
+    def action_dist(self, weights: ReplayBufferAgentWeights,
+                    observation: jnp.ndarray) -> tfp.distributions.Distribution:
+        return self._action_dist(weights.agent_weights, observation)
+
+    def update(
+            self, weights: ReplayBufferAgentWeights,
+            transition: environment_lib.Transition) -> ReplayBufferAgentWeights:
+        batch_shape = transition.done.shape
+        if batch_shape:
+            replay_buffer = weights.replay_buffer.with_transitions(transition)
+        else:
+            replay_buffer = weights.replay_buffer.with_transition(transition)
+        seed, replay_seed, next_seed = jax.random.split(weights.seed, 3)
+        transitions = replay_buffer.sample_uniform(
+            batch_shape=(self._gradient_batch_size,), seed=replay_seed)
+
+        return dataclasses.replace(
+            weights,
+            agent_weights=self._update(
+                weights.agent_weights,
+                transitions=weights.replay_buffer.transitions,
+                seed=seed),
+            replay_buffer=replay_buffer,
+            seed=next_seed)
+
+    def _update(self, weights: Any, transitions: environment_lib.Transition,
+                seed: type_util.KeyArray) -> Any:
+        raise NotImplementedError()
+
+
 def episode_reward_to_go(rewards: jnp.ndarray,
                          done: jnp.ndarray,
                          discount_factor: float,

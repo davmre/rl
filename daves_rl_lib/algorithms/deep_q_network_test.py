@@ -39,8 +39,10 @@ class DQNTests(test_util.TestCase):
                                         epsilon=epsilon,
                                         target_weights_decay=0.9)
 
-        weights = agent.init_weights(test_util.test_seed())
-        qvalues = net.apply(weights.qvalue_weights, obs)
+        weights = agent.init_weights(test_util.test_seed(),
+                                     dummy_observation=jnp.zeros([]),
+                                     dummy_action=jnp.zeros([]))
+        qvalues = net.apply(weights.agent_weights.qvalue_weights, obs)
         self.assertEqual(qvalues.shape, batch_shape + (num_actions,))
         best_actions = jnp.argmax(qvalues, axis=-1)
 
@@ -154,16 +156,19 @@ class DQNTests(test_util.TestCase):
         weights = dataclasses.replace(
             weights,
             replay_buffer=weights.replay_buffer.with_transitions(transitions),
-            qvalue_target_weights=jax.tree_util.tree_map(
-                jnp.zeros_like, weights.qvalue_target_weights))
+            agent_weights=dataclasses.replace(
+                weights.agent_weights,
+                qvalue_target_weights=jax.tree_util.tree_map(
+                    jnp.zeros_like,
+                    weights.agent_weights.qvalue_target_weights)))
 
         mean_abs_td_error = jax.jit(lambda w: jnp.mean(
             jnp.abs(
                 deep_q_network.qvalues_and_td_error(
                     transition=w.replay_buffer.transitions,
                     qvalue_net=agent.qvalue_net,
-                    qvalue_weights=w.qvalue_weights,
-                    qvalue_target_weights=w.qvalue_target_weights,
+                    qvalue_weights=w.agent_weights.qvalue_weights,
+                    qvalue_target_weights=w.agent_weights.qvalue_target_weights,
                     discount_factor=discount_factor)[-1])))
 
         td_error = mean_abs_td_error(weights)
@@ -222,8 +227,8 @@ class DQNTests(test_util.TestCase):
         self.assertLess(mean_return, env.discount_factor)
         self.assertGreater(mean_return, (1 - epsilon)**2 * env.discount_factor)
 
-        self.assertAllClose(agent.qvalue_net.apply(weights.qvalue_weights,
-                                                   initial_state_obs),
+        self.assertAllClose(agent.qvalue_net.apply(
+            weights.agent_weights.qvalue_weights, initial_state_obs),
                             [env.discount_factor**3, env.discount_factor],
                             atol=0.03)
 
