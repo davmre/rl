@@ -37,10 +37,12 @@ class DiscreteTargetEnvironment(environment_lib.Environment):
                  size=1,
                  dim=1,
                  one_hot_features=False,
+                 action_noise_prob=None,
                  discount_factor=1.):
         self._size = size
         self._dim = dim
         self._one_hot_features = one_hot_features
+        self._action_noise_prob = action_noise_prob
         super().__init__(
             action_space=environment_lib.ActionSpace(num_actions=dim * 2),
             discount_factor=discount_factor)
@@ -82,6 +84,18 @@ class DiscreteTargetEnvironment(environment_lib.Environment):
     def _step(self, state: environment_lib.State, action: jnp.ndarray):
         # action is an int between 0 and dim*2.
         state_pos = self._from_features(state.observation)
+
+        seed = state.seed
+        if self._action_noise_prob is not None:
+            seed, choice_seed, noise_seed = jax.random.split(seed, 3)
+            use_noise_action = jax.random.uniform(
+                choice_seed, shape=()) < self._action_noise_prob
+            noise_action = jax.random.randint(noise_seed,
+                                              shape=(),
+                                              minval=0,
+                                              maxval=self._dim * 2)
+            action = jnp.where(use_noise_action, noise_action, action)
+
         action_dim = action % self._dim
         action_dir = (action // self._dim) * 2 - 1
         delta = action_dir * jax.nn.one_hot(
@@ -96,7 +110,8 @@ class DiscreteTargetEnvironment(environment_lib.Environment):
         return dataclasses.replace(state,
                                    observation=self._to_features(new_state_pos),
                                    done=new_state_done,
-                                   reward=jnp.where(new_state_done, 1., 0.))
+                                   reward=jnp.where(new_state_done, 1., 0.),
+                                   seed=seed)
 
 
 class ContinuousEnvironmentStateless(environment_lib.Environment):
