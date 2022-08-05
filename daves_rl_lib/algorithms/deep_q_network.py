@@ -53,7 +53,7 @@ class DQNAgent(agent_lib.ReplayBufferAgent):
     def qvalue_net(self):
         return self._qvalue_net
 
-    def _init_weights(self, seed: type_util.KeyArray) -> DQNWeights:
+    def _init_weights(self, seed: type_util.KeyArray, **kwargs) -> DQNWeights:
         qvalue_weights = self.qvalue_net.init(seed)
         return DQNWeights(
             qvalue_weights=qvalue_weights,

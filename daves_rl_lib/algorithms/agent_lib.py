@@ -141,6 +141,9 @@ class PeriodicUpdateAgent(Agent):
             num_updates=jnp.zeros([], dtype=jnp.int32),
             agent_weights=self._init_weights(seed,
                                              batch_size=batch_size,
+                                             
+                                             dummy_observation=dummy_observation,
+                                             dummy_action=dummy_action,
                                              **kwargs))
 
     def action_dist(self, weights: PeriodicUpdateAgentWeights,
@@ -202,7 +205,10 @@ class ReplayBufferAgent(Agent):
                 size=self._replay_buffer_size,
                 observation=dummy_observation,
                 action=dummy_action),
-            agent_weights=self._init_weights(weights_seed, **kwargs),
+            agent_weights=self._init_weights(weights_seed, 
+                                             dummy_observation=dummy_observation,
+                                             dummy_action=dummy_action,
+                                             **kwargs),
             seed=seed)
 
     def action_dist(self, weights: ReplayBufferAgentWeights,
