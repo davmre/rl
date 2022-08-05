@@ -20,6 +20,10 @@ class Transition:
     reward: jnp.ndarray
     done: jnp.ndarray
 
+    @property
+    def batch_shape(self):
+        return self.done.shape
+
 
 @dataclasses.dataclass
 class ActionSpace:
