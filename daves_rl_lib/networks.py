@@ -24,9 +24,10 @@ class NetworkInTraining:
 class MLP(linen.Module):
     """MLP module."""
     layer_sizes: Sequence[int]
-    activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.relu
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.swish
     kernel_init: Callable[..., Any] = jax.nn.initializers.lecun_uniform()
     activate_final: Optional[Callable] = None
+    activate_final_param_size: Optional[int] = None
     bias: bool = True
 
     @linen.compact
@@ -41,7 +42,15 @@ class MLP(linen.Module):
             if i != len(self.layer_sizes) - 1:
                 x = self.activation(x)
         if self.activate_final:
-            x = self.activate_final(x)
+            if self.activate_final_param_size is not None:
+                # Initialize shared parameters for the final activation,
+                # e.g., variance of a Normal distribution.
+                activate_final_param = self.param(
+                    'activate_final', self.kernel_init,
+                    (self.activate_final_param_size,))
+                x = self.activate_final(x, activate_final_param)
+            else:
+                x = self.activate_final(x)
         return x
 
 
@@ -74,10 +83,38 @@ def categorical_from_logits(logits):
 def make_model(layer_sizes: Sequence[int],
                obs_size: int,
                activation: Callable[[jnp.ndarray], jnp.ndarray] = linen.swish,
-               activate_final=None):
+               activate_final=None,
+               activate_final_params_size: Optional[int] = None):
     dummy_obs = jnp.ones([obs_size])
     module = MLP(layer_sizes=layer_sizes,
                  activation=activation,
-                 activate_final=activate_final)
+                 activate_final=activate_final,
+                 activate_final_param_size=activate_final_params_size)
     return FeedForwardModel(init=lambda rng: module.init(rng, dummy_obs),
                             apply=module.apply)
+
+
+def make_normal_model(hidden_layer_sizes: Sequence[int],
+                      obs_size: int,
+                      output_size: int,
+                      activation: Callable[[jnp.ndarray],
+                                           jnp.ndarray] = linen.swish,
+                      use_global_stddev: bool = True):
+    if use_global_stddev:
+        activate_final = lambda x, s: tfp.distributions.Independent(
+            tfp.distributions.Normal(x, jax.nn.softplus(s)),
+            reinterpreted_batch_ndims=1)
+        layer_sizes = list(hidden_layer_sizes) + [output_size]
+        shared_params_size = output_size
+    else:
+        activate_final = lambda x: tfp.distributions.Independent(
+            tfp.distributions.Normal(x[..., :output_size],
+                                     jax.nn.softplus(x[..., output_size:])),
+            reinterpreted_batch_ndims=1)
+        layer_sizes = list(hidden_layer_sizes) + [output_size * 2]
+        shared_params_size = None
+    return make_model(layer_sizes=layer_sizes,
+                      obs_size=obs_size,
+                      activation=activation,
+                      activate_final=activate_final,
+                      activate_final_params_size=shared_params_size)
