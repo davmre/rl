@@ -67,7 +67,8 @@ class A2CAgent(agent_lib.PeriodicUpdateAgent):
 
     def _init_weights(self,
                       seed: type_util.KeyArray,
-                      batch_size: Optional[int] = None) -> A2CWeights:
+                      batch_size: Optional[int] = None,
+                      **kwargs) -> A2CWeights:
         policy_seed, value_seed = jax.random.split(seed, 2)
         policy_weights = self._policy_net.init(policy_seed)
         value_weights = self._value_net.init(value_seed)
